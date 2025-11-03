@@ -1,0 +1,38 @@
+# GraphQL Schema Definition
+# 动态数据服务的GraphQL Schema定义
+
+type Query {
+    # 健康检查查询
+    health: String
+
+    # 动态查询支持
+    dynamicQuery(sql: String!, parameters: String): [GenericResult]
+
+    # 根据ID获取用户信息
+    getUserById(userId: ID!): User
+}
+
+type Mutation {
+  # 新增：插入一个用户
+  createUser(name: String!, email: String!): MutationResult
+}
+
+# 返回插入影响行数 + 是否成功
+type MutationResult {
+  affected: Int
+  success: Boolean
+}
+
+
+# 用户类型定义
+type User {
+    id: ID!
+    name: String
+    email: String
+}
+
+# 通用结果类型，用于动态查询
+type GenericResult {
+    # 动态字段，实际字段由查询结果决定
+    data: String
+}
