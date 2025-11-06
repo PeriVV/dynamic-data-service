@@ -325,6 +325,15 @@ public class ResolverConfig {
         this.enabled = true;
     }
 
+    // com.example.dynamicdata.entity.ResolverConfig
+
+    @Column(name = "data_source", length = 32, nullable = false)
+    private String dataSource = "MYSQL";  // MYSQL | POSTGRESQL | DM8
+
+    public String getDataSource() { return dataSource; }
+    public void setDataSource(String ds) { this.dataSource = ds; }
+
+
     // ==================== Getter和Setter方法 ====================
     
     /**

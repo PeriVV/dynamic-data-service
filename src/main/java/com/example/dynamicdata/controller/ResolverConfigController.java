@@ -249,10 +249,6 @@ public class ResolverConfigController {
         }
     }
 
-
-
-
-
     /**
      * 验证操作类型是否有效
      * @param operationType 操作类型

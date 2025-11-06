@@ -4,6 +4,7 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -40,21 +41,34 @@ public class DynamicSqlExecutor {
     private JdbcTemplate choose(boolean useSandbox) {
         return useSandbox ? sandboxJdbcTemplate : mainJdbcTemplate;
     }
+    @Autowired @Qualifier("dmJdbcTemplate")
+    private JdbcTemplate dmJdbcTemplate;
+
+    @Autowired @Qualifier("dmSandboxJdbcTemplate")
+    private JdbcTemplate dmSandboxJdbcTemplate;
+
+// 仍然保留你原来的 mainJdbcTemplate / sandboxJdbcTemplate (MySQL)
+
+    private JdbcTemplate resolveTemplate(String kind, boolean useSandbox) {
+        String k = (kind == null ? "MYSQL" : kind.trim().toUpperCase());
+        return switch (k) {
+            case "DM8" -> (useSandbox ? dmSandboxJdbcTemplate : dmJdbcTemplate);
+            // 如你后续要接 PostgreSQL，在此扩展 POSTGRESQL 分支
+            case "MYSQL" -> (useSandbox ? sandboxJdbcTemplate : mainJdbcTemplate);
+            default -> throw new IllegalArgumentException("Unsupported dataSourceKind: " + kind);
+        };
+    }
+
 
     @Autowired
     public DynamicSqlExecutor(
             @Qualifier("mainJdbcTemplate") JdbcTemplate mainJdbcTemplate,
-            @Qualifier("sandboxJdbcTemplate") JdbcTemplate sandboxJdbcTemplate) {
+            @Qualifier("sandboxJdbcTemplate") JdbcTemplate sandboxJdbcTemplate, ObjectProvider<JdbcTemplate> dmJdbcProvider) {
         this.mainJdbcTemplate = mainJdbcTemplate;
         this.sandboxJdbcTemplate = sandboxJdbcTemplate;
+        this.dmJdbcProvider = dmJdbcProvider;
     }
 
-    /**
-     * 根据 useSandbox 选择 JdbcTemplate
-     **/
-    private JdbcTemplate pick(boolean useSandbox) {
-        return useSandbox ? sandboxJdbcTemplate : mainJdbcTemplate;
-    }
 
     // ===================== 核心执行入口 ===================== //
 
@@ -105,10 +119,10 @@ public class DynamicSqlExecutor {
     }
 
     /**
-     * 更新操作（默认主库）
+     * 更新操作
      */
     public int executeUpdate(String sql, Map<String, Object> parameters) {
-        return executeUpdate(sql, parameters, false);
+        return executeUpdate(sql, parameters, true);
     }
 
     // ===================== 工具函数 ===================== //
@@ -157,6 +171,34 @@ public class DynamicSqlExecutor {
         }
     }
 
+    // 新增：带 dataSourceKind 参数
+    public List<Map<String,Object>> executeQuery(String sql, Map<String,Object> params, String dataSourceKind, boolean useSandbox) {
+        if (!validateQuerySql(sql)) throw new IllegalArgumentException("Invalid SELECT");
+        String processed = processSqlParameters(sql, params);
+        Object[] values = extractParameterValues(sql, params);
+        JdbcTemplate jt = resolveTemplate(dataSourceKind, useSandbox);
+
+        return jt.query(processed, rs -> {
+            List<Map<String, Object>> list = new ArrayList<>();
+            var md = rs.getMetaData(); int n = md.getColumnCount();
+            while (rs.next()) {
+                Map<String, Object> row = new LinkedHashMap<>();
+                for (int i = 1; i <= n; i++) row.put(md.getColumnLabel(i), rs.getObject(i));
+                list.add(row);
+            }
+            return list;
+        }, values);
+    }
+
+    public int executeUpdate(String sql, Map<String,Object> params, String dataSourceKind, boolean useSandbox) {
+        if (!validateUpdateSql(sql)) throw new IllegalArgumentException("Invalid DML");
+        String processed = processSqlParameters(sql, params);
+        Object[] values = extractParameterValues(sql, params);
+        JdbcTemplate jt = resolveTemplate(dataSourceKind, useSandbox);
+        return jt.update(processed, values);
+    }
+
+
     // ===================== SQL安全检查 ===================== //
 
     /**
@@ -189,5 +231,31 @@ public class DynamicSqlExecutor {
     public boolean validateUpdateSql(String sql) {
         String s = sql != null ? sql.trim().toLowerCase() : "";
         return (s.startsWith("insert") || s.startsWith("update") || s.startsWith("delete")) && validateSql(sql);
+    }
+
+
+    private final ObjectProvider<JdbcTemplate> dmJdbcProvider;
+
+    public List<Map<String, Object>> queryOnMain(String sql) {
+        return mainJdbcTemplate.queryForList(sql);
+    }
+
+    public List<Map<String, Object>> queryOnSandbox(String sql) {
+        return sandboxJdbcTemplate.queryForList(sql);
+    }
+
+    public List<Map<String, Object>> queryOnDm(String sql) {
+        JdbcTemplate dm = dmJdbcProvider.getIfAvailable();
+        if (dm == null) {
+            throw new IllegalStateException("DM8 未配置或未启用：请设置 dm8.datasource.url 后再试。");
+        }
+        return dm.queryForList(sql);
+    }
+
+    public String pingDm() {
+        JdbcTemplate dm = dmJdbcProvider.getIfAvailable();
+        if (dm == null) return "disabled";
+        Integer one = dm.queryForObject("SELECT 1", Integer.class);
+        return (one != null && one == 1) ? "connected" : "unhealthy";
     }
 }

@@ -4,6 +4,8 @@ document.addEventListener('DOMContentLoaded', function() {
     let currentStep = 1;
     let wizardData = {};
     const GRAPHQL_TYPES = ['String', 'Int', 'Float', 'Boolean', 'ID'];
+    const ACTIVE_DS_KEY = 'activeDataSource'; // sessionStorage 存储键
+
 
     // DOM Element References
     const loadingOverlay = document.getElementById('loadingOverlay');
@@ -24,9 +26,58 @@ document.addEventListener('DOMContentLoaded', function() {
     // --- Initializer ---
     const initializeApp = () => {
         setupEventListeners();
+        initDataSourceCards();
         resetWizard();
         loadResolvers();
+        // 初始化时，把页面上默认选中的卡片写入 wizardData 与 sessionStorage，并探测徽章
+        try {
+          const selected = document.querySelector('.data-source-card.selected');
+          if (selected) {
+            const src = (selected.dataset.source || 'mysql').toUpperCase();
+            wizardData.dataSource = src;
+            sessionStorage.setItem(ACTIVE_DS_KEY, JSON.stringify({
+              type: src,
+              label: selected.querySelector('h5')?.innerText?.trim() || src,
+              url: '' // 如需展示URL，后面会从 /info 补
+            }));
+            // 探测一下
+            probeDataSourceAndPaintBadge(selected, src);
+          }
+        } catch {}
+
     };
+
+    function initDataSourceCards() {
+      const cards = document.querySelectorAll('.data-source-card');
+      cards.forEach(card => {
+        card.addEventListener('click', () => {
+          // 1) 切换selected高亮
+          cards.forEach(c => c.classList.remove('selected'));
+          card.classList.add('selected');
+
+          // 2) 写入当前数据源
+          const source = (card.dataset.source || '').toUpperCase(); // 'MYSQL' | 'POSTGRESQL' | 'DM8'
+          wizardData.dataSource = source;
+          // 持久化到 sessionStorage，带上展示名
+          sessionStorage.setItem(ACTIVE_DS_KEY, JSON.stringify({
+            type: source,
+            label: card.querySelector('h5')?.innerText?.trim() || source,
+            url: ''
+          }));
+
+          // 3) 触发预览联动
+          generatePreview();
+
+          // 4) 实时探测连通性，更新徽章
+          probeDataSourceAndPaintBadge(card, source);
+
+          // 5) 如果当前正处在第2步，刷新“当前数据源”条
+          if (currentStep === 2) {
+            renderActiveDsBar(); // 下面会给出实现
+          }
+        });
+      });
+    }
 
     // --- Event Listeners Setup ---
     const setupEventListeners = () => {
@@ -132,10 +183,17 @@ document.addEventListener('DOMContentLoaded', function() {
         prevBtn.style.display = step > 1 ? 'block' : 'none';
         nextBtn.style.display = step < 3 ? 'block' : 'none';
         nextBtn.innerHTML = step === 2 ? '预览发布 <i class="fas fa-eye"></i>' : '下一步 <i class="fas fa-arrow-right"></i>';
+        // 在 updateWizardStep 末尾追加：
+        if (step === 2) {
+          renderActiveDsBar();   // 显示并刷新
+        } else {
+          const bar = document.getElementById('activeDsBar');
+          if (bar) bar.classList.add('hidden'); // 其它步骤隐藏
+        }
     };
 
     const resetWizard = () => {
-        wizardData = { dataSource: 'mysql', editMode: false, editId: null };
+        wizardData = { dataSource: 'MYSQL', editMode: false, editId: null };
         [resolverNameInput, descriptionInput, sqlQueryInput].forEach(i => i.value = '');
         operationTypeInput.value = 'QUERY';
         [inputParamsContainer, outputFieldsContainer, testParamsContainer].forEach(c => c.innerHTML = '');
@@ -313,6 +371,25 @@ document.addEventListener('DOMContentLoaded', function() {
             updateWizardStep(2);
             wizardContainer.scrollIntoView({ behavior: 'smooth' });
             showNotification(`编辑模式: ${config.resolverName}`, 'info');
+            // 在拿到 config 后（你已有 resetWizard() 之后的赋值），追加：
+            wizardData.dataSource = (config.dataSource || 'MYSQL').toUpperCase();
+
+            // 让相应卡片选中（如果页面存在三张卡）
+            document.querySelectorAll('.data-source-card').forEach(c => {
+              const ds = (c.dataset.source || '').toUpperCase();
+              c.classList.toggle('selected', ds === wizardData.dataSource);
+            });
+            // 写入 sessionStorage
+            sessionStorage.setItem(ACTIVE_DS_KEY, JSON.stringify({
+              type: wizardData.dataSource,
+              label: document.querySelector(`.data-source-card[data-source="${(wizardData.dataSource || '').toLowerCase()}"] h5`)?.innerText?.trim()
+                      || wizardData.dataSource,
+              url: ''
+            }));
+
+            // 若此时已在第2步/或切到第2步后，会显示
+            renderActiveDsBar();
+
         } catch (error) {
             showNotification(`Error: ${error.message}`, 'error');
         } finally {
@@ -437,7 +514,12 @@ document.addEventListener('DOMContentLoaded', function() {
             const response = await fetch(`${API_BASE}/test-sql`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ sql, parameters })
+                body: JSON.stringify({
+                  sql,
+                  parameters,
+                  dataSource: (wizardData.dataSource || 'MYSQL').toUpperCase(),
+                  useSandbox: true
+                })
             });
             const result = await response.json();
             if (!response.ok) throw new Error(result.message || '测试查询失败');
@@ -621,7 +703,7 @@ document.addEventListener('DOMContentLoaded', function() {
         }
     }
     
-    // 重置查询
+    // 重置指令
     function resetGraphQLQuery() {
         const modal = bootstrap.Modal.getInstance(document.getElementById('apiTestModal'));
         if (modal && modal._element.dataset.currentConfig) {
@@ -631,9 +713,223 @@ document.addEventListener('DOMContentLoaded', function() {
         resetModalResult();
     }
 
+    async function probeDataSourceAndPaintBadge(cardEl, sourceUpper) {
+      const key = sourceUpper.toLowerCase();
+      const badge = document.querySelector(`[data-ds-badge="${key}"]`);
+      if (!badge) return;
+
+      badge.className = 'badge bg-warning text-dark';
+      badge.textContent = '检测中…';
+
+      try {
+        const resp = await fetch(`/api/datasources/${encodeURIComponent(sourceUpper)}/status`, {
+          headers: { 'Accept': 'application/json' }
+        });
+
+        if (!resp.ok) {
+          badge.className = 'badge bg-danger';
+          badge.textContent = '连接失败';
+          return;
+        }
+
+        const data = await resp.json().catch(() => ({}));
+        const configured = !!data.configured;
+        const ok = !!data.ok;
+
+        if (!configured) {
+          badge.className = 'badge bg-secondary';
+          badge.textContent = '未配置';
+        } else if (ok) {
+          badge.className = 'badge bg-success';
+          badge.textContent = '已连接';
+        } else {
+          badge.className = 'badge bg-danger';
+          // 有 message 就展示一点
+          badge.textContent = data.message ? ('连接失败: ' + String(data.message).slice(0, 30)) : '连接失败';
+        }
+      } catch (e) {
+        badge.className = 'badge bg-danger';
+        badge.textContent = '连接异常';
+      }
+    }
+
+    function renderActiveDsBar() {
+      const bar   = document.getElementById('activeDsBar');
+      const badge = document.getElementById('activeDsBadge');
+      const label = document.getElementById('activeDsLabel');
+      const urlEl = document.getElementById('activeDsUrl');
+
+      if (!bar || !badge || !label || !urlEl) return;
+
+      // 从 wizardData 优先取；兜底用 sessionStorage
+      let type = (wizardData.dataSource || '').toUpperCase();
+      let saved = null;
+      try { saved = JSON.parse(sessionStorage.getItem(ACTIVE_DS_KEY) || 'null'); } catch {}
+      if (!type && saved?.type) type = saved.type;
+
+      if (!type) {
+        bar.classList.add('hidden');
+        return;
+      }
+
+      // 展示条
+      bar.classList.remove('hidden');
+
+      const displayLabel = saved?.label || ({
+        MYSQL: 'MySQL 数据库',
+        DM8: 'DM8 (达梦数据库)',
+        POSTGRESQL: 'PostgreSQL',
+        API: '外部API'
+      }[type] || type);
+
+      label.textContent = displayLabel;
+      urlEl.textContent = saved?.url || ''; // 若为空，稍后 /info 会补上
+      badge.className = 'badge bg-warning text-dark';
+      badge.textContent = '检测中…';
+
+      // 1) 连通性
+      fetch(`/api/datasources/${encodeURIComponent(type)}/status`, { headers: { 'Accept': 'application/json' } })
+        .then(r => r.json())
+        .then(data => {
+          if (!data || data.configured === false) {
+            badge.className = 'badge bg-secondary';
+            badge.textContent = '未配置';
+          } else if (data.ok) {
+            badge.className = 'badge bg-success';
+            badge.textContent = '已连接';
+          } else {
+            badge.className = 'badge bg-danger';
+            badge.textContent = data.message ? ('连接失败: ' + String(data.message).slice(0, 30)) : '连接失败';
+          }
+        })
+        .catch(() => {
+          badge.className = 'badge bg-danger';
+          badge.textContent = '检测异常';
+        });
+
+      // 2) 取URL/池名（可选后端 /info），没有也不报错
+      fetch(`/api/datasources/${encodeURIComponent(type)}/info`, { headers: { 'Accept': 'application/json' } })
+        .then(r => r.ok ? r.json() : null)
+        .then(info => {
+          if (!info) return;
+          if (info.url && !saved?.url) {
+            urlEl.textContent = info.url;
+            // 回写 sessionStorage，提升展示体验
+            try {
+              sessionStorage.setItem(ACTIVE_DS_KEY, JSON.stringify({
+                ...(saved || { type, label: displayLabel }),
+                url: info.url
+              }));
+            } catch {}
+          }
+        })
+        .catch(() => {});
+    }
+
+
+    // 重置测试数据库
+    async function resetDataBase() {
+        const btn = document.getElementById('resetDataBase');
+        if (!btn) return;
+
+        // 1) 二次确认
+        if (!confirm('确定要重置测试数据库吗？这会用主库数据覆盖临时库（dynamic_data_service_sandbox）。')) {
+            return;
+        }
+
+        // 2) UI状态
+        showLoading(true);
+        btn.disabled = true;
+        const originalText = btn.innerHTML;
+        btn.innerHTML = '<i class="fas fa-sync fa-spin"></i> 重置中...';
+
+        // 3) 工具：超时 + 轮询
+        const timeoutMs = 2 * 60 * 1000; // 120秒超时
+        const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+        const fetchWithTimeout = async (url, options = {}, ms = timeoutMs) => {
+            const controller = new AbortController();
+            const t = setTimeout(() => controller.abort(), ms);
+            try {
+                return await fetch(url, { ...options, signal: controller.signal });
+            } finally {
+                clearTimeout(t);
+            }
+        };
+
+        // 4) 调用重置接口
+        try {
+            const resp = await fetchWithTimeout('/api/admin/sandbox/reset', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ reason: 'ui-reset' }) // 可选
+            });
+
+            // 4.1 同步完成：200/201
+            if (resp.ok && resp.status !== 202) {
+                const result = await resp.json().catch(() => ({}));
+                if (result && result.success) {
+                    showNotification(result.message || '测试数据库已成功重置。', 'success');
+                } else {
+                    showNotification(result.message || '重置完成，但未返回明确结果。', 'info');
+                }
+                return;
+            }
+
+            // 4.2 异步任务：202 + jobId -> 轮询进度
+            if (resp.status === 202) {
+                const payload = await resp.json().catch(() => ({}));
+                const jobId = payload.jobId;
+                if (!jobId) throw new Error('后端未返回 jobId，无法轮询任务状态。');
+
+                // 轮询：最多 30 次，指数退避（1s, 1.5s, 2s...）
+                let tries = 0;
+                let delay = 1000;
+                while (tries < 30) {
+                    await sleep(delay);
+                    tries += 1;
+                    delay = Math.min(Math.floor(delay * 1.5), 5000); // 逐步增加至 5s
+
+                    const s = await fetchWithTimeout(`/api/admin/sandbox/reset/${encodeURIComponent(jobId)}/status`, {
+                        method: 'GET',
+                        headers: { 'Accept': 'application/json' }
+                    }, timeoutMs);
+
+                    if (!s.ok) continue;
+                    const status = await s.json().catch(() => ({}));
+                    if (status && status.done) {
+                        if (status.success) {
+                            showNotification(status.message || '测试数据库已成功重置。', 'success');
+                        } else {
+                            showNotification(status.message || '重置失败。', 'error');
+                        }
+                        return;
+                    }
+                }
+                // 超过轮询次数
+                showNotification('重置操作已提交，但长时间未完成，请稍后在日志中确认状态。', 'warning');
+                return;
+            }
+
+            // 4.3 其它HTTP状态
+            const text = await resp.text().catch(() => '');
+            throw new Error(text || `重置接口响应异常（HTTP ${resp.status}）`);
+
+        } catch (err) {
+            showNotification(`重置失败：${err.message || err}`, 'error');
+        } finally {
+            // 5) 恢复UI
+            showLoading(false);
+            btn.disabled = false;
+            btn.innerHTML = originalText;
+        }
+    }
+
+
     initializeApp();
     
     // 绑定模态框事件
     document.getElementById('executeGraphqlBtn').addEventListener('click', executeGraphQLQuery);
     document.getElementById('resetQueryBtn').addEventListener('click', resetGraphQLQuery);
+    document.getElementById('resetDataBase').addEventListener('click', resetDataBase);
+
 });
