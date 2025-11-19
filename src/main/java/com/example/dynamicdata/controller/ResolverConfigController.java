@@ -1,10 +1,8 @@
 package com.example.dynamicdata.controller;
 
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
-import java.util.Optional;
+import java.util.*;
 
+import com.example.dynamicdata.utils.DbNameResolver;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.DeleteMapping;
@@ -19,6 +17,9 @@ import org.springframework.web.bind.annotation.RestController;
 import com.example.dynamicdata.entity.ResolverConfig;
 import com.example.dynamicdata.service.DynamicSqlExecutor;
 import com.example.dynamicdata.service.ResolverConfigService;
+
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.jdbc.core.JdbcTemplate;
 
 /**
  * GraphQL解析器配置管理控制器
@@ -45,6 +46,17 @@ public class ResolverConfigController {
      */
     @Autowired
     private DynamicSqlExecutor sqlExecutor;
+
+    private String dataSourceKind;
+
+    // 注入各数据源的 JdbcTemplate 和 URL（按需修改你的 Bean 名和配置键）
+    @Autowired(required = false) JdbcTemplate mainJdbcTemplate;     // MySQL
+    @Autowired(required = false) JdbcTemplate dmJdbcTemplate;        // DM8
+    @Autowired(required = false) JdbcTemplate pgJdbcTemplate;        // PostgreSQL
+
+    @Value("${spring.datasource.url:}")       private String mysqlUrl;
+    @Value("${dm8.datasource.url:}")          private String dm8Url;
+    @Value("${postgres.datasource.url:}")     private String pgUrl;
 
     /**
      * 获取所有解析器配置
@@ -216,38 +228,50 @@ public class ResolverConfigController {
                 return ResponseEntity.badRequest().body(response);
             }
 
-            // 判断是否是查询语句
+            String dataSourceKind = Optional.ofNullable(request.get("dataSourceKind"))
+                    .map(Object::toString)
+                    .map(String::toUpperCase)
+                    .orElse("MYSQL");
+
             String lowerSql = sql.trim().toLowerCase();
             boolean isSelect = lowerSql.startsWith("select");
-
-            // 所有“查询”操作 → 主库
-            // 所有“插入/更新/删除”操作 → 临时库
             boolean useSandbox = !isSelect;
 
             if (isSelect) {
-                List<Map<String, Object>> result = sqlExecutor.executeQuery(sql, parameters, useSandbox);
+                List<Map<String, Object>> result =
+                        sqlExecutor.executeQuery(sql, parameters, dataSourceKind, useSandbox);
+
                 response.put("success", true);
                 response.put("type", "QUERY");
                 response.put("database", useSandbox ? "sandbox" : "main");
-                response.put("dbName", sqlExecutor.currentDb(useSandbox));   // ★ 新增
+                response.put("dbName", sqlExecutor.currentDb(dataSourceKind, useSandbox));
                 response.put("data", result);
                 response.put("count", result.size());
             } else {
-                int affected = sqlExecutor.executeUpdate(sql, parameters, useSandbox);
+                int affected =
+                        sqlExecutor.executeUpdate(sql, parameters, dataSourceKind, useSandbox);
+
                 response.put("success", true);
                 response.put("type", "UPDATE");
                 response.put("database", useSandbox ? "sandbox" : "main");
-                response.put("dbName", sqlExecutor.currentDb(useSandbox));   // ★ 新增
+                response.put("dbName", sqlExecutor.currentDb(dataSourceKind, useSandbox));
                 response.put("affectedRows", affected);
             }
 
             return ResponseEntity.ok(response);
         } catch (Exception e) {
+            // ★ 找到根本原因
+            Throwable root = e;
+            while (root.getCause() != null && root.getCause() != root) {
+                root = root.getCause();
+            }
             response.put("success", false);
-            response.put("message", "Error executing SQL: " + e.getMessage());
+            response.put("message", "Error executing SQL: " + root.getMessage());
             return ResponseEntity.badRequest().body(response);
         }
     }
+
+
 
     /**
      * 验证操作类型是否有效
@@ -256,5 +280,32 @@ public class ResolverConfigController {
      */
     private boolean isValidOperationType(String operationType) {
         return "QUERY".equals(operationType) || "MUTATION".equals(operationType);
+    }
+
+    // 把 resolver 实体转为 Map/DTO 时调用：
+    private Map<String, Object> toView(ResolverConfig rc) {
+        String type = (rc.getDataSource() == null ? "MYSQL" : rc.getDataSource()).toUpperCase(Locale.ROOT);
+
+        String url;
+        JdbcTemplate jt;
+        switch (type) {
+            case "DM8" -> { url = dm8Url; jt = dmJdbcTemplate; }
+            case "POSTGRESQL" -> { url = pgUrl; jt = pgJdbcTemplate; }
+            default -> { url = mysqlUrl; jt = mainJdbcTemplate; }
+        }
+        String dbName = DbNameResolver.resolveDatabaseName(type, url, jt);
+
+        Map<String, Object> m = new LinkedHashMap<>();
+        m.put("id", rc.getId());
+        m.put("resolverName", rc.getResolverName());
+        m.put("operationType", rc.getOperationType());
+        m.put("description", rc.getDescription());
+        m.put("dataSource", type);
+        m.put("databaseName", dbName);         // ★ 新增字段
+        m.put("sqlQuery", rc.getSqlQuery());
+        m.put("inputParameters", rc.getInputParameters());
+        m.put("outputFields", rc.getOutputFields());
+        m.put("enabled", rc.getEnabled());
+        return m;
     }
 }

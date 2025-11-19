@@ -4,15 +4,31 @@ schema { query: Query, mutation: Mutation }
 
 type Query {
   health: String!
+  getUserById(id: ID!): User
+  getOrderById(id: ID!): Order
 }
 
 type Mutation {
   createUser(name: String!, email: String!): MutationResult!
   updateUser(name: String, email: String, id: ID!): MutationResult!
   deleteUserById(id: ID!): MutationResult!
+  createOrder(id: Int, userName: String, amount: Float, createdAt: String): MutationResult
 }
 
 type MutationResult {
   affected: Int!
   success: Boolean!
+}
+
+type User {
+    id: ID!
+    name: String!
+    email: String!
+}
+
+type Order {
+    id: ID!
+    USER_NAME: String
+    AMOUNT: String
+    CREATED_AT: String
 }

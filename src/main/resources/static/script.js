@@ -307,17 +307,51 @@ document.addEventListener('DOMContentLoaded', function() {
             if (!response.ok) throw new Error('Failed to fetch resolvers.');
             const resolvers = await response.json();
             resolverList.innerHTML = resolvers.length === 0
-                ? `<div class="empty-state"><div class="empty-state-icon"><i class="fas fa-database"></i></div><h5>还没有创建任何API接口</h5><p>使用上面的向导创建您的第一个数据接口</p></div>`
-                : resolvers.map(r => `
-                    <div class="resolver-card">
-                        <div class="resolver-header"><span class="resolver-name">${escapeHtml(r.resolverName)}</span><span class="resolver-type">${r.operationType}</span></div>
-                        <p class="resolver-description">${escapeHtml(r.description) || 'No description.'}</p>
-                        <div class="resolver-actions">
-                            <button class="btn btn-sm btn-outline" data-action="test" data-id="${r.id}" data-resolver="${r.resolverName}" data-type="${r.operationType}" data-description="${escapeHtml(r.description || '无描述')}"><i class="fas fa-vial"></i> 试用</button>
-                            <button class="btn btn-sm btn-outline" data-action="edit" data-id="${r.id}"><i class="fas fa-edit"></i> 编辑</button>
-                            <button class="btn btn-sm btn-outline" data-action="delete" data-id="${r.id}" data-name="${r.resolverName}" style="color:var(--danger-color);border-color:var(--danger-color);"><i class="fas fa-trash"></i> 删除</button>
-                        </div>
-                    </div>`).join('');
+              ? `<div class="empty-state">
+                   <div class="empty-state-icon"><i class="fas fa-database"></i></div>
+                   <h5>还没有创建任何API接口</h5>
+                   <p>使用上面的向导创建您的第一个数据接口</p>
+                 </div>`
+              : resolvers.map(r => {
+                  const ds = (r.dataSource || 'UNKNOWN').toUpperCase();   // <- 来自后端
+                  const dbName = (r.dbName || '').trim();                 // <- 若将来后端补上库名可自动显示
+                  const dsText = dbName ? `${ds} · ${dbName}` : ds;
+
+                  return `
+                  <div class="resolver-card">
+                    <div class="resolver-header">
+                      <span class="resolver-name">${escapeHtml(r.resolverName)}</span>
+                      <span class="resolver-type">${r.operationType}</span>
+                    </div>
+
+                    <div class="resolver-meta">
+                      <span class="badge badge-ds"><i class="fas fa-database"></i> ${escapeHtml(dsText)}</span>
+                      ${Boolean(r.enabled) ? '<span class="badge badge-on">启用</span>' : '<span class="badge badge-off">停用</span>'}
+                    </div>
+
+                    <p class="resolver-description">${escapeHtml(r.description) || 'No description.'}</p>
+
+                    <div class="resolver-actions">
+                      <button class="btn btn-sm btn-outline"
+                              data-action="test"
+                              data-id="${r.id}"
+                              data-resolver="${r.resolverName}"
+                              data-type="${r.operationType}"
+                              data-description="${escapeHtml(r.description || '无描述')}"
+                              data-ds="${escapeHtml(ds)}"
+                              data-db="${escapeHtml(dbName)}">
+                        <i class="fas fa-vial"></i> 试用
+                      </button>
+                      <button class="btn btn-sm btn-outline" data-action="edit" data-id="${r.id}">
+                        <i class="fas fa-edit"></i> 编辑
+                      </button>
+                      <button class="btn btn-sm btn-outline" data-action="delete" data-id="${r.id}" data-name="${r.resolverName}"
+                              style="color:var(--danger-color);border-color:var(--danger-color);">
+                        <i class="fas fa-trash"></i> 删除
+                      </button>
+                    </div>
+                  </div>`;
+                }).join('');
         } catch (error) {
             showNotification(`Error: ${error.message}`, 'error');
         } finally {
@@ -415,37 +449,52 @@ document.addEventListener('DOMContentLoaded', function() {
 
     // API试用模态框相关功能
     async function openApiTestModal(id, resolverName, operationType, description) {
+      try {
+        // 1) 拉取配置
+        const response = await fetch(`${API_BASE}/${id}`);
+        if (!response.ok) throw new Error('无法获取接口详情');
+        const config = await response.json();
+
+        // 2) 基本信息填充
+        document.getElementById('modalResolverName').textContent = resolverName;
+        const operationBadge = document.getElementById('modalOperationType');
+        operationBadge.textContent = operationType;
+        operationBadge.className = `badge ${operationType.toLowerCase()}`;
+        document.getElementById('modalDescription').textContent = description;
+
+        // 3) 数据源展示（类型 + 库名/Schema）
+        const ds = (config.dataSource || 'UNKNOWN').toUpperCase();
+        let dbName = '';
         try {
-            // 获取完整的resolver配置
-            const response = await fetch(`${API_BASE}/${id}`);
-            if (!response.ok) throw new Error('无法获取接口详情');
-            const config = await response.json();
-            
-            // 填充模态框信息
-            document.getElementById('modalResolverName').textContent = resolverName;
-            const operationBadge = document.getElementById('modalOperationType');
-            operationBadge.textContent = operationType;
-            operationBadge.className = `badge ${operationType.toLowerCase()}`;
-            document.getElementById('modalDescription').textContent = description;
-            
-            // 生成示例GraphQL查询
-            const exampleQuery = generateGraphQLQuery(config);
-            document.getElementById('modalGraphqlQuery').value = exampleQuery;
-            
-            // 重置结果显示
-            resetModalResult();
-            
-            // 保存配置信息供重置使用
-            document.getElementById('apiTestModal').dataset.currentConfig = JSON.stringify(config);
-            
-            // 显示模态框
-            const modal = new bootstrap.Modal(document.getElementById('apiTestModal'));
-            modal.show();
-            
-        } catch (error) {
-            showNotification(`打开试用界面失败: ${error.message}`, 'error');
-        }
+          const dbResp = await fetch(`/api/datasources/${encodeURIComponent(ds)}/current-db`, {
+            headers: { 'Accept': 'application/json' }
+          });
+          if (dbResp.ok) {
+            const j = await dbResp.json();
+            if (j && j.success && j.database) dbName = String(j.database).trim();
+          }
+        } catch (_) { /* 忽略 */ }
+
+        const dsText = dbName ? `${ds} · ${dbName}` : ds;
+        const dsSpan = document.getElementById('modalDataSource');
+        if (dsSpan) dsSpan.textContent = dsText;
+
+        // 4) 生成示例 GraphQL
+        const exampleQuery = generateGraphQLQuery(config);
+        document.getElementById('modalGraphqlQuery').value = exampleQuery;
+
+        // 5) 重置结果 & 打开模态框
+        resetModalResult();
+        document.getElementById('apiTestModal').dataset.currentConfig = JSON.stringify(config);
+        const modal = new bootstrap.Modal(document.getElementById('apiTestModal'));
+        modal.show();
+
+      } catch (error) {
+        console.error('[openApiTestModal]', error);
+        showNotification(`打开试用界面失败: ${error.message}`, 'error');
+      }
     }
+
     
     function generateGraphQLQuery(config) {
         const { resolverName, operationType, inputParameters } = config;
@@ -497,7 +546,7 @@ document.addEventListener('DOMContentLoaded', function() {
     async function testQuery() {
         const sql = sqlQueryInput.value.trim();
         if (!sql) return showNotification('请输入SQL查询语句', 'warning');
-        
+
         const parameters = {};
         testParamsContainer.querySelectorAll('.dynamic-input-row').forEach(row => {
             const key = row.querySelector('.key-input').value;
@@ -509,21 +558,28 @@ document.addEventListener('DOMContentLoaded', function() {
             }
         });
 
+        // 根据是否是 SELECT 决定是否使用 sandbox（非 SELECT 走 sandbox）
+        const isSelect = sql.toLowerCase().startsWith('select');
+        const useSandbox = !isSelect;
+
         showLoading(true);
         try {
             const response = await fetch(`${API_BASE}/test-sql`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
-                  sql,
-                  parameters,
-                  dataSource: (wizardData.dataSource || 'MYSQL').toUpperCase(),
-                  useSandbox: true
+                    sql,
+                    parameters,
+                    // ★ 关键：告诉后端这是哪种数据源（MYSQL / DM8）
+                    dataSourceKind: (wizardData.dataSource || 'MYSQL').toUpperCase(),
+                    useSandbox
                 })
             });
             const result = await response.json();
-            if (!response.ok) throw new Error(result.message || '测试查询失败');
-            
+            if (!response.ok || !result.success) {
+                throw new Error(result.message || '测试查询失败');
+            }
+
             const previewDiv = document.getElementById('queryPreview');
             if (result.data && result.data.length > 0) {
                 const headers = Object.keys(result.data[0]);
@@ -539,8 +595,12 @@ document.addEventListener('DOMContentLoaded', function() {
                                     <tr>${headers.map(h => `<th>${escapeHtml(h)}</th>`).join('')}</tr>
                                 </thead>
                                 <tbody>
-                                    ${result.data.slice(0, 5).map(row => 
-                                        `<tr>${headers.map(h => `<td title="${escapeHtml(String(row[h] || ''))}">${escapeHtml(String(row[h] || '').length > 50 ? String(row[h] || '').substring(0, 50) + '...' : String(row[h] || ''))}</td>`).join('')}</tr>`
+                                    ${result.data.slice(0, 5).map(row =>
+                                        `<tr>${headers.map(h => {
+                                            const full = String(row[h] ?? '');
+                                            const short = full.length > 50 ? full.slice(0, 50) + '...' : full;
+                                            return `<td title="${escapeHtml(full)}">${escapeHtml(short)}</td>`;
+                                        }).join('')}</tr>`
                                     ).join('')}
                                 </tbody>
                             </table>
@@ -556,11 +616,11 @@ document.addEventListener('DOMContentLoaded', function() {
             showLoading(false);
         }
     }
-    
+
     function generatePreview() {
         const previewContent = document.getElementById('previewContent');
         const exampleQuery = document.getElementById('exampleQuery');
-        
+
         // 确保wizardData有默认值
         if (!wizardData.dataSource) {
             wizardData.dataSource = 'mysql';
@@ -828,24 +888,51 @@ document.addEventListener('DOMContentLoaded', function() {
 
 
     // 重置测试数据库
+    // 重置测试数据库（根据当前数据源类型：MYSQL / DM8）
     async function resetDataBase() {
         const btn = document.getElementById('resetDataBase');
         if (!btn) return;
 
-        // 1) 二次确认
-        if (!confirm('确定要重置测试数据库吗？这会用主库数据覆盖临时库（dynamic_data_service_sandbox）。')) {
+        // 1) 识别当前数据源类型（优先用 wizardData.dataSource，兜底用 sessionStorage 里的 ACTIVE_DS_KEY）
+        let type = (wizardData.dataSource || '').toUpperCase();
+        let saved = null;
+        try {
+            saved = JSON.parse(sessionStorage.getItem(ACTIVE_DS_KEY) || 'null');
+        } catch {}
+        if (!type && saved?.type) type = saved.type;
+
+        if (!type) {
+            showNotification('当前未选中任何数据源，无法重置测试库。', 'warning');
             return;
         }
 
-        // 2) UI状态
+        // 2) 根据类型选择不同的后端 URL
+        let resetUrl;
+        let humanName;
+        if (type === 'MYSQL') {
+            resetUrl = '/api/admin/sandbox/reset';          // 你原来的 MySQL 重置接口
+            humanName = 'MySQL 测试库';
+        } else if (type === 'DM8') {
+            resetUrl = '/api/admin/sandbox/reset-dm8';      // 我们刚刚新加的 DM8 重置接口
+            humanName = 'DM8 测试库';
+        } else {
+            showNotification(`当前数据源类型 ${type} 暂不支持一键重置测试库`, 'warning');
+            return;
+        }
+
+        // 3) 二次确认文案，带上具体类型名字
+        if (!confirm(`确定要重置 ${humanName} 吗？这会用对应主库的数据覆盖测试库。`)) {
+            return;
+        }
+
+        // 4) UI 状态
         showLoading(true);
         btn.disabled = true;
         const originalText = btn.innerHTML;
         btn.innerHTML = '<i class="fas fa-sync fa-spin"></i> 重置中...';
 
-        // 3) 工具：超时 + 轮询
-        const timeoutMs = 2 * 60 * 1000; // 120秒超时
-        const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+        // 简单封装带超时的 fetch
+        const timeoutMs = 2 * 60 * 1000;
         const fetchWithTimeout = async (url, options = {}, ms = timeoutMs) => {
             const controller = new AbortController();
             const t = setTimeout(() => controller.abort(), ms);
@@ -856,73 +943,36 @@ document.addEventListener('DOMContentLoaded', function() {
             }
         };
 
-        // 4) 调用重置接口
         try {
-            const resp = await fetchWithTimeout('/api/admin/sandbox/reset', {
+            // 5) 调用对应后端
+            const resp = await fetchWithTimeout(resetUrl, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ reason: 'ui-reset' }) // 可选
+                body: JSON.stringify({ reason: 'ui-reset' })
             });
 
-            // 4.1 同步完成：200/201
-            if (resp.ok && resp.status !== 202) {
-                const result = await resp.json().catch(() => ({}));
-                if (result && result.success) {
-                    showNotification(result.message || '测试数据库已成功重置。', 'success');
-                } else {
-                    showNotification(result.message || '重置完成，但未返回明确结果。', 'info');
-                }
-                return;
+            const text = await resp.text();
+            let payload = {};
+            try { payload = text ? JSON.parse(text) : {}; } catch { payload = {}; }
+
+            if (!resp.ok || payload.success === false) {
+                throw new Error(payload.message || text || `HTTP ${resp.status}`);
             }
 
-            // 4.2 异步任务：202 + jobId -> 轮询进度
-            if (resp.status === 202) {
-                const payload = await resp.json().catch(() => ({}));
-                const jobId = payload.jobId;
-                if (!jobId) throw new Error('后端未返回 jobId，无法轮询任务状态。');
-
-                // 轮询：最多 30 次，指数退避（1s, 1.5s, 2s...）
-                let tries = 0;
-                let delay = 1000;
-                while (tries < 30) {
-                    await sleep(delay);
-                    tries += 1;
-                    delay = Math.min(Math.floor(delay * 1.5), 5000); // 逐步增加至 5s
-
-                    const s = await fetchWithTimeout(`/api/admin/sandbox/reset/${encodeURIComponent(jobId)}/status`, {
-                        method: 'GET',
-                        headers: { 'Accept': 'application/json' }
-                    }, timeoutMs);
-
-                    if (!s.ok) continue;
-                    const status = await s.json().catch(() => ({}));
-                    if (status && status.done) {
-                        if (status.success) {
-                            showNotification(status.message || '测试数据库已成功重置。', 'success');
-                        } else {
-                            showNotification(status.message || '重置失败。', 'error');
-                        }
-                        return;
-                    }
-                }
-                // 超过轮询次数
-                showNotification('重置操作已提交，但长时间未完成，请稍后在日志中确认状态。', 'warning');
-                return;
-            }
-
-            // 4.3 其它HTTP状态
-            const text = await resp.text().catch(() => '');
-            throw new Error(text || `重置接口响应异常（HTTP ${resp.status}）`);
-
+            // 成功提示，带上后端返回的 message
+            showNotification(
+                payload.message || `${humanName} 已成功重置。`,
+                'success'
+            );
         } catch (err) {
-            showNotification(`重置失败：${err.message || err}`, 'error');
+            showNotification(`重置 ${humanName} 失败：${err.message || err}`, 'error');
         } finally {
-            // 5) 恢复UI
             showLoading(false);
             btn.disabled = false;
             btn.innerHTML = originalText;
         }
     }
+
 
 
     initializeApp();

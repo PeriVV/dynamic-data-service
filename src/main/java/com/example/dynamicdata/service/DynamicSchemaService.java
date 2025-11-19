@@ -360,24 +360,48 @@ public class DynamicSchemaService {
         return env -> {
             Map<String, Object> args = env.getArguments();
             String sql = config.getSqlQuery();
-            String ds = config.getDataSource(); // MYSQL / DM8 / POSTGRESQL
-            if (sql == null || sql.isBlank()) throw new RuntimeException("SQL为空: " + config.getResolverName());
+            // ★ 从配置里拿数据源类型，默认 MYSQL
+            String ds = Optional.ofNullable(config.getDataSource())
+                    .map(String::trim)
+                    .map(String::toUpperCase)
+                    .orElse("MYSQL");   // MYSQL / DM8 / POSTGRESQL
+
+            if (sql == null || sql.isBlank()) {
+                throw new RuntimeException("SQL为空: " + config.getResolverName());
+            }
 
             boolean isSelect = sql.trim().toLowerCase().startsWith("select");
-            if ("QUERY".equalsIgnoreCase(config.getOperationType())) {
-                List<Map<String, Object>> rows = sqlExecutor.executeQuery(sql, args);
-                boolean single = config.getResolverName().matches(".*(ById|ByCode|ByName)$");
-                return single ? (rows.isEmpty() ? null : rows.get(0)) : rows;
-            } else if ("MUTATION".equalsIgnoreCase(config.getOperationType())) {
-                int affected = sqlExecutor.executeUpdate(sql, args);
-                Map<String, Object> r = new LinkedHashMap<>();
-                r.put("success", true);
-                r.put("affected", affected);
-                return r;
+            boolean useSandbox = !isSelect;  // 查询走主库，写操作走 sandbox
+
+            try {
+                if ("QUERY".equalsIgnoreCase(config.getOperationType())) {
+                    // ★ 用带 dataSourceKind + useSandbox 的重载
+                    List<Map<String, Object>> rows =
+                            sqlExecutor.executeQuery(sql, args, ds, useSandbox);
+
+                    boolean single = config.getResolverName() != null
+                            && config.getResolverName().matches(".*(ById|ByCode|ByName)$");
+
+                    return single ? (rows.isEmpty() ? null : rows.get(0)) : rows;
+
+                } else if ("MUTATION".equalsIgnoreCase(config.getOperationType())) {
+                    int affected =
+                            sqlExecutor.executeUpdate(sql, args, ds, useSandbox);
+
+                    Map<String, Object> r = new LinkedHashMap<>();
+                    r.put("success", affected > 0);
+                    r.put("affected", affected);
+                    return r;
+                }
+
+                throw new RuntimeException("Unsupported operation type: " + config.getOperationType());
+            } catch (Exception e) {
+                // ★ 包一层，GraphQL 里会显示 “Error executing SQL: xxx”
+                throw new RuntimeException("Error executing SQL: " + e.getMessage(), e);
             }
-            throw new RuntimeException("Unsupported operation type: " + config.getOperationType());
         };
     }
+
 
     // --------------------------- 其它工具/校验 ---------------------------
 

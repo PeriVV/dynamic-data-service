@@ -163,6 +163,9 @@
                 <div class="wizard-navigation">
                     <button class="btn btn-outline" id="prevBtn" style="display: none;"><i class="fas fa-arrow-left"></i> 上一步</button>
                     <button class="btn btn-primary" id="nextBtn">下一步 <i class="fas fa-arrow-right"></i></button>
+                    <button class="btn btn-outline-secondary ms-2" onclick="window.location.href='tables.html'">
+                        📋 查看数据库表
+                    </button>
                 </div>
             </div>
         </div>
@@ -194,6 +197,10 @@
                             <div class="mb-3">
                                 <label class="form-label"><strong>接口信息</strong></label>
                                 <div class="api-info-card">
+                                    <div class="api-info-item">
+                                        <span class="api-info-label">数据源:</span>
+                                        <span id="modalDataSource"></span> <!-- ★ 新增 -->
+                                    </div>
                                     <div class="api-info-item">
                                         <span class="api-info-label">接口名称:</span>
                                         <span id="modalResolverName"></span>
@@ -255,5 +262,16 @@
 
     <script src="https://cdnjs.cloudflare.com/ajax/libs/bootstrap/5.1.3/js/bootstrap.bundle.min.js"></script>
     <script src="script.js"></script>
+    <script>
+        function goToTables() {
+          const active = document.querySelector('.data-source-card.active');
+          if (!active) {
+            alert('请先选择数据源！');
+            return;
+          }
+          const ds = active.dataset.dsType; // 比如 MYSQL 或 DM8
+          window.location.href = `tables.html?ds=${ds}`;
+        }
+    </script>
 </body>
 </html>

@@ -7,6 +7,7 @@ import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.dao.DataAccessException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 
@@ -79,43 +80,55 @@ public class DynamicSqlExecutor {
         return executeQuery(sql, parameters, false);
     }
 
-    /* 查询 */
+    /* 查询（MySQL / DM8，useSandbox 版本） */
     public List<Map<String, Object>> executeQuery(String sql, Map<String, Object> params, boolean useSandbox) {
         if (!validateQuerySql(sql)) throw new IllegalArgumentException("Invalid SELECT");
         String processed = processSqlParameters(sql, params);
         Object[] values = extractParameterValues(sql, params);
         JdbcTemplate jt = choose(useSandbox);
 
-        // 打印当前数据库名，帮助你确认到底连的是哪个库
-        String db = jt.queryForObject("SELECT DATABASE()", String.class);
-        logger.info("Execute QUERY on DB = {}", db);
-        logger.debug("SQL={} , values={}", processed, Arrays.toString(values));
-
-        return jt.query(processed, rs -> {
-            List<Map<String, Object>> list = new ArrayList<>();
-            ResultSetMetaData md = rs.getMetaData();
-            int n = md.getColumnCount();
-            while (rs.next()) {
-                Map<String, Object> row = new LinkedHashMap<>();
-                for (int i = 1; i <= n; i++) row.put(md.getColumnLabel(i), rs.getObject(i));
-                list.add(row);
-            }
-            return list;
-        }, values);
+        logger.debug("EXECUTE QUERY: sql={}, values={}", processed, Arrays.toString(values));
+        try {
+            return jt.query(processed, rs -> {
+                List<Map<String, Object>> list = new ArrayList<>();
+                ResultSetMetaData md = rs.getMetaData();
+                int n = md.getColumnCount();
+                while (rs.next()) {
+                    Map<String, Object> row = new LinkedHashMap<>();
+                    for (int i = 1; i <= n; i++) {
+                        row.put(md.getColumnLabel(i), rs.getObject(i));
+                    }
+                    list.add(row);
+                }
+                return list;
+            }, values);
+        } catch (DataAccessException e) {
+            Throwable root = e.getMostSpecificCause();
+            String msg = (root != null ? root.getMessage() : e.getMessage());
+            logger.error("Execute query failed. sql={}, values={}, error={}",
+                    processed, Arrays.toString(values), msg);
+            // 抛一个带“干净”文案的异常，给 GlobalExceptionHandler 用
+            throw new RuntimeException("Error executing SQL: " + msg, e);
+        }
     }
 
-    /* 增删改 */
+    /* 增删改（useSandbox 版本） */
     public int executeUpdate(String sql, Map<String, Object> params, boolean useSandbox) {
         if (!validateUpdateSql(sql)) throw new IllegalArgumentException("Invalid DML");
         String processed = processSqlParameters(sql, params);
         Object[] values = extractParameterValues(sql, params);
         JdbcTemplate jt = choose(useSandbox);
 
-        String db = jt.queryForObject("SELECT DATABASE()", String.class);
-        logger.info("Execute UPDATE on DB = {}", db);
-        logger.debug("SQL={} , values={}", processed, Arrays.toString(values));
-
-        return jt.update(processed, values);
+        logger.debug("EXECUTE UPDATE: sql={}, values={}", processed, Arrays.toString(values));
+        try {
+            return jt.update(processed, values);
+        } catch (DataAccessException e) {
+            Throwable root = e.getMostSpecificCause();
+            String msg = (root != null ? root.getMessage() : e.getMessage());
+            logger.error("Execute update failed. sql={}, values={}, error={}",
+                    processed, Arrays.toString(values), msg);
+            throw new RuntimeException("Error executing SQL: " + msg, e);
+        }
     }
 
     /**
@@ -135,6 +148,31 @@ public class DynamicSqlExecutor {
             return "UNKNOWN";
         }
     }
+
+    public String currentDb(String dataSourceKind, boolean useSandbox) {
+        String kind = (dataSourceKind == null ? "MYSQL" : dataSourceKind.trim().toUpperCase());
+        try {
+            JdbcTemplate jt = resolveTemplate(kind, useSandbox);
+            return switch (kind) {
+                case "DM8" -> {
+                    // DM 类 Oracle，用 SYS_CONTEXT 取当前模式
+                    String schema = jt.queryForObject(
+                            "SELECT SYS_CONTEXT('USERENV','CURRENT_SCHEMA') AS CUR_SCHEMA FROM DUAL",
+                            String.class
+                    );
+                    yield schema;
+                }
+                // 以后如果加 PG：
+                // case "POSTGRESQL" -> jt.queryForObject("SELECT current_database()", String.class);
+                default -> jt.queryForObject("SELECT DATABASE()", String.class); // MySQL
+            };
+        } catch (Exception e) {
+            logger.warn("Cannot query current database name for kind {}: {}", kind, e.getMessage());
+            return "UNKNOWN";
+        }
+    }
+
+
 
     /**
      * 将 #{param} 占位符替换为 ?
@@ -206,12 +244,25 @@ public class DynamicSqlExecutor {
      */
     public boolean validateSql(String sql) {
         if (sql == null || sql.trim().isEmpty()) return false;
-        String s = sql.trim().toLowerCase();
 
-        boolean allowed = s.startsWith("select") || s.startsWith("insert")
-                || s.startsWith("update") || s.startsWith("delete");
+        // 1) 先去掉首尾空格
+        String trimmed = sql.trim();
+
+        // 2) 允许“末尾一个分号”，去掉后再检查
+        if (trimmed.endsWith(";")) {
+            trimmed = trimmed.substring(0, trimmed.length() - 1).trim();
+        }
+
+        String s = trimmed.toLowerCase(Locale.ROOT);
+
+        // 3) 只允许这几种开头
+        boolean allowed = s.startsWith("select")
+                || s.startsWith("insert")
+                || s.startsWith("update")
+                || s.startsWith("delete");
         if (!allowed) return false;
 
+        // 4) 再检查：中间不能再有分号、不能有注释
         if (s.contains(";") || s.contains("--") || s.contains("/*")) return false;
 
         String[] dangerous = {"drop", "alter", "truncate", "exec", "script", "xp_"};
@@ -223,6 +274,7 @@ public class DynamicSqlExecutor {
         }
         return true;
     }
+
 
     public boolean validateQuerySql(String sql) {
         return sql != null && sql.trim().toLowerCase().startsWith("select") && validateSql(sql);
