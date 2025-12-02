@@ -80,6 +80,11 @@
             <artifactId>DmJdbcDriver18</artifactId>
             <version>8.1.2.192</version>
         </dependency>
+        <!-- PostgreSQL driver -->
+        <dependency>
+            <groupId>org.postgresql</groupId>
+            <artifactId>postgresql</artifactId>
+        </dependency>
         <dependency>
             <groupId>org.projectlombok</groupId>
             <artifactId>lombok</artifactId>

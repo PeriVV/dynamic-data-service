@@ -114,12 +114,25 @@ public class DynamicSqlExecutor {
 
     /* 增删改（useSandbox 版本） */
     public int executeUpdate(String sql, Map<String, Object> params, boolean useSandbox) {
-        if (!validateUpdateSql(sql)) throw new IllegalArgumentException("Invalid DML");
+
+        String s = sql.trim().toLowerCase(Locale.ROOT);
+
+        // DML + DDL 全部走 executeUpdate
+        boolean isSelect = s.startsWith("select");
+        if (isSelect) {
+            throw new IllegalArgumentException("Invalid DML: SELECT 请使用 executeQuery()");
+        }
+
+        if (!validateUpdateSql(sql)) {
+            throw new IllegalArgumentException("Invalid DML: 不支持的 SQL 操作 -> " + sql);
+        }
+
         String processed = processSqlParameters(sql, params);
         Object[] values = extractParameterValues(sql, params);
         JdbcTemplate jt = choose(useSandbox);
 
         logger.debug("EXECUTE UPDATE: sql={}, values={}", processed, Arrays.toString(values));
+
         try {
             return jt.update(processed, values);
         } catch (DataAccessException e) {
@@ -130,6 +143,7 @@ public class DynamicSqlExecutor {
             throw new RuntimeException("Error executing SQL: " + msg, e);
         }
     }
+
 
     /**
      * 更新操作
@@ -245,33 +259,29 @@ public class DynamicSqlExecutor {
     public boolean validateSql(String sql) {
         if (sql == null || sql.trim().isEmpty()) return false;
 
-        // 1) 先去掉首尾空格
         String trimmed = sql.trim();
-
-        // 2) 允许“末尾一个分号”，去掉后再检查
         if (trimmed.endsWith(";")) {
             trimmed = trimmed.substring(0, trimmed.length() - 1).trim();
         }
 
         String s = trimmed.toLowerCase(Locale.ROOT);
 
-        // 3) 只允许这几种开头
-        boolean allowed = s.startsWith("select")
-                || s.startsWith("insert")
-                || s.startsWith("update")
-                || s.startsWith("delete");
+        // ===== 允许的 SQL 类型 =====
+        boolean allowed =
+                s.startsWith("select") ||
+                        s.startsWith("insert") ||
+                        s.startsWith("update") ||
+                        s.startsWith("delete") ||
+                        s.startsWith("create") ||
+                        s.startsWith("alter") ||
+                        s.startsWith("drop") ||
+                        s.startsWith("truncate");
+
         if (!allowed) return false;
 
-        // 4) 再检查：中间不能再有分号、不能有注释
+        // ===== 禁止多语句、注释 =====
         if (s.contains(";") || s.contains("--") || s.contains("/*")) return false;
 
-        String[] dangerous = {"drop", "alter", "truncate", "exec", "script", "xp_"};
-        for (String k : dangerous) {
-            if (s.contains(k)) {
-                logger.warn("SQL rejected: dangerous keyword [{}]", k);
-                return false;
-            }
-        }
         return true;
     }
 
@@ -281,9 +291,20 @@ public class DynamicSqlExecutor {
     }
 
     public boolean validateUpdateSql(String sql) {
-        String s = sql != null ? sql.trim().toLowerCase() : "";
-        return (s.startsWith("insert") || s.startsWith("update") || s.startsWith("delete")) && validateSql(sql);
+        if (sql == null) return false;
+        String s = sql.trim().toLowerCase(Locale.ROOT);
+
+        // DML
+        if (s.startsWith("insert") || s.startsWith("update") || s.startsWith("delete"))
+            return validateSql(sql);
+
+        // DDL —— 新增支持
+        if (s.startsWith("create") || s.startsWith("alter") || s.startsWith("drop") || s.startsWith("truncate"))
+            return validateSql(sql);
+
+        return false;
     }
+
 
 
     private final ObjectProvider<JdbcTemplate> dmJdbcProvider;

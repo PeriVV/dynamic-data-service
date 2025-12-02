@@ -8,6 +8,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
+import org.springframework.http.converter.HttpMessageNotReadableException;
 import org.springframework.web.bind.annotation.ControllerAdvice;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.context.request.WebRequest;
@@ -214,6 +215,25 @@ public class GlobalExceptionHandler {
         // 记录参数异常的处理结果
         logger.info("参数异常已转换为用户友好的400响应");
         
+        return new ResponseEntity<>(errorResponse, HttpStatus.BAD_REQUEST);
+    }
+
+    /**
+     * 处理请求体解析失败（例如 JSON 为空或格式错误）
+     */
+    @ExceptionHandler(HttpMessageNotReadableException.class)
+    public ResponseEntity<Map<String, Object>> handleHttpMessageNotReadable(
+            HttpMessageNotReadableException ex, WebRequest request) {
+
+        logger.warn("请求体解析失败: {}, path={}", ex.getMessage(), request.getDescription(false));
+
+        Map<String, Object> errorResponse = new HashMap<>();
+        errorResponse.put("timestamp", LocalDateTime.now());
+        errorResponse.put("status", HttpStatus.BAD_REQUEST.value());
+        errorResponse.put("error", "请求体错误");
+        errorResponse.put("message", "请求体不能为空或格式错误，请提供有效的 JSON");
+        errorResponse.put("path", request.getDescription(false));
+
         return new ResponseEntity<>(errorResponse, HttpStatus.BAD_REQUEST);
     }
 

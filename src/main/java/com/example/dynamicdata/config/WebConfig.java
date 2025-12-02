@@ -18,7 +18,7 @@ public class WebConfig implements WebMvcConfigurer {
      * 从配置文件中读取允许的跨域域名
      * 默认只允许本地开发环境访问
      */
-    @Value("${app.cors.allowed-origins:http://localhost:3000,http://localhost:8080,http://localhost:8081}")
+    @Value("${app.cors.allowed-origins:http://localhost:5173,http://localhost:3000,http://localhost:8080,http://localhost:8081}")
     private String[] allowedOrigins;
 
     /**
@@ -31,16 +31,19 @@ public class WebConfig implements WebMvcConfigurer {
     public void addCorsMappings(@NonNull CorsRegistry registry) {
         registry.addMapping("/api/**")
                 .allowedOrigins(allowedOrigins)
-                .allowedMethods("GET", "POST", "PUT", "DELETE")
-                .allowedHeaders("Content-Type", "Authorization", "X-Requested-With")
+                .allowedMethods("GET", "POST", "PUT", "DELETE", "OPTIONS")
+                // 放宽头部，允许自定义认证头（Authorization/Auth）
+                .allowedHeaders("*")
+                .exposedHeaders("Authorization", "Auth")
                 .allowCredentials(true)
-                .maxAge(3600); // 预检请求缓存时间1小时
-        
+                .maxAge(3600);
+
         // GraphQL端点的CORS配置
         registry.addMapping("/graphql")
                 .allowedOrigins(allowedOrigins)
-                .allowedMethods("POST")
-                .allowedHeaders("Content-Type", "Authorization")
+                .allowedMethods("POST", "OPTIONS")
+                .allowedHeaders("*")
+                .exposedHeaders("Authorization", "Auth")
                 .allowCredentials(true)
                 .maxAge(3600);
     }

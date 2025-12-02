@@ -6,6 +6,9 @@ type Query {
   health: String!
   getUserById(id: ID!): User
   getOrderById(id: ID!): Order
+  getUserOrders(
+    userId: Int!
+  ): [UserOrder!]!
 }
 
 type Mutation {
@@ -31,4 +34,15 @@ type Order {
     USER_NAME: String
     AMOUNT: String
     CREATED_AT: String
+}
+
+type UserOrder {
+    userId: Int!
+    userName: String!
+    email: String!
+    orderId: Int!
+    orderNo: String!
+    status: String!
+    amountCents: Int!
+    createdAt: String!  # 你以后可以换成自定义 DateTime scalar
 }

@@ -20,28 +20,27 @@ import com.example.dynamicdata.entity.SchemaDefinition;
 import com.example.dynamicdata.service.DynamicSchemaService;
 
 /**
- * GraphQL Schema管理控制器
- * 
- * 提供GraphQL Schema定义的CRUD操作和管理功能，包括：
- * - Schema的创建、更新、删除
- * - Schema的激活和停用
- * - Schema语法验证
- * - 动态重新加载GraphQL Schema
+ * GraphQL Schema 管理控制器
+ *
+ * 提供 GraphQL Schema 定义的 CRUD 操作和管理功能，包括：
+ * - Schema 的创建、更新、删除
+ * - Schema 的激活和停用
+ * - Schema 语法验证
+ * - 动态重新加载 GraphQL Schema
  */
 @RestController
 @RequestMapping("/api/schemas")
 public class SchemaController {
     
     /**
-     * 动态Schema服务
-     * 负责Schema的业务逻辑处理
+     * 动态 Schema 服务，负责 Schema 的业务逻辑处理
      */
     @Autowired
     private DynamicSchemaService dynamicSchemaService;
     
     /**
-     * 获取所有Schema定义
-     * @return 所有Schema定义列表
+     * 获取所有 Schema 定义
+     * @return 所有 Schema 定义列表
      */
     @GetMapping
     public ResponseEntity<List<SchemaDefinition>> getAllSchemas() {
@@ -50,8 +49,8 @@ public class SchemaController {
     }
     
     /**
-     * 获取激活的Schema定义
-     * @return 当前激活的Schema定义列表
+     * 获取激活的 Schema 定义
+     * @return 当前激活的 Schema 定义列表
      */
     @GetMapping("/active")
     public ResponseEntity<List<SchemaDefinition>> getActiveSchemas() {
@@ -60,9 +59,9 @@ public class SchemaController {
     }
     
     /**
-     * 根据ID获取Schema
-     * @param id Schema的唯一标识符
-     * @return Schema定义或404状态
+     * 根据 ID 获取 Schema
+     * @param id Schema 的唯一标识符
+     * @return Schema 定义或 404 状态
      */
     @GetMapping("/{id}")
     public ResponseEntity<SchemaDefinition> getSchemaById(@PathVariable Long id) {
@@ -70,33 +69,27 @@ public class SchemaController {
             .filter(s -> s.getId().equals(id))
             .findFirst();
         
-        if (schema.isPresent()) {
-            return ResponseEntity.ok(schema.get());
-        } else {
-            return ResponseEntity.notFound().build();
-        }
+        return schema.map(ResponseEntity::ok)
+                .orElseGet(() -> ResponseEntity.notFound().build());
     }
     
     /**
-     * 根据名称获取Schema
-     * @param schemaName Schema名称
-     * @return Schema定义或404状态
+     * 根据名称获取 Schema
+     * @param schemaName Schema 名称
+     * @return Schema 定义或 404 状态
      */
     @GetMapping("/name/{schemaName}")
     public ResponseEntity<SchemaDefinition> getSchemaByName(@PathVariable String schemaName) {
         Optional<SchemaDefinition> schema = dynamicSchemaService.getSchemaByName(schemaName);
         
-        if (schema.isPresent()) {
-            return ResponseEntity.ok(schema.get());
-        } else {
-            return ResponseEntity.notFound().build();
-        }
+        return schema.map(ResponseEntity::ok)
+                .orElseGet(() -> ResponseEntity.notFound().build());
     }
     
     /**
-     * 创建新的Schema定义
-     * @param request 创建Schema的请求参数
-     * @return 创建的Schema定义或错误信息
+     * 创建新的 Schema 定义
+     * @param request 创建 Schema 的请求参数
+     * @return 创建的 Schema 定义或错误信息
      */
     @PostMapping
     public ResponseEntity<?> createSchema(@RequestBody CreateSchemaRequest request) {
@@ -115,10 +108,10 @@ public class SchemaController {
     }
     
     /**
-     * 更新Schema定义
-     * @param id Schema的唯一标识符
-     * @param request 更新Schema的请求参数
-     * @return 更新后的Schema定义或错误信息
+     * 更新 Schema 定义
+     * @param id Schema 的唯一标识符
+     * @param request 更新 Schema 的请求参数
+     * @return 更新后的 Schema 定义或错误信息
      */
     @PutMapping("/{id}")
     public ResponseEntity<?> updateSchema(@PathVariable Long id, @RequestBody UpdateSchemaRequest request) {
@@ -137,8 +130,8 @@ public class SchemaController {
     }
     
     /**
-     * 激活Schema
-     * @param id Schema的唯一标识符
+     * 激活 Schema
+     * @param id Schema 的唯一标识符
      * @return 操作结果信息
      */
     @PostMapping("/{id}/activate")
@@ -146,7 +139,7 @@ public class SchemaController {
         try {
             dynamicSchemaService.activateSchema(id);
             Map<String, String> response = new HashMap<>();
-            response.put("message", "Schema已激活");
+            response.put("message", "Schema 已激活");
             return ResponseEntity.ok(response);
         } catch (Exception e) {
             Map<String, String> error = new HashMap<>();
@@ -156,8 +149,8 @@ public class SchemaController {
     }
     
     /**
-     * 停用Schema
-     * @param id Schema的唯一标识符
+     * 停用 Schema
+     * @param id Schema 的唯一标识符
      * @return 操作结果信息
      */
     @PostMapping("/{id}/deactivate")
@@ -165,7 +158,7 @@ public class SchemaController {
         try {
             dynamicSchemaService.deactivateSchema(id);
             Map<String, String> response = new HashMap<>();
-            response.put("message", "Schema已停用");
+            response.put("message", "Schema 已停用");
             return ResponseEntity.ok(response);
         } catch (Exception e) {
             Map<String, String> error = new HashMap<>();
@@ -175,8 +168,8 @@ public class SchemaController {
     }
     
     /**
-     * 删除Schema定义
-     * @param id Schema的唯一标识符
+     * 删除 Schema 定义
+     * @param id Schema 的唯一标识符
      * @return 操作结果信息
      */
     @DeleteMapping("/{id}")
@@ -184,7 +177,7 @@ public class SchemaController {
         try {
             dynamicSchemaService.deleteSchema(id);
             Map<String, String> response = new HashMap<>();
-            response.put("message", "Schema已删除");
+            response.put("message", "Schema 已删除");
             return ResponseEntity.ok(response);
         } catch (Exception e) {
             Map<String, String> error = new HashMap<>();
@@ -194,7 +187,7 @@ public class SchemaController {
     }
     
     /**
-     * 重新加载GraphQL Schema
+     * 重新加载 GraphQL Schema
      * @return 操作结果信息
      */
     @PostMapping("/reload")
@@ -202,7 +195,7 @@ public class SchemaController {
         try {
             dynamicSchemaService.reloadGraphQLSchema();
             Map<String, String> response = new HashMap<>();
-            response.put("message", "GraphQL Schema已重新加载");
+            response.put("message", "GraphQL Schema 已重新加载");
             return ResponseEntity.ok(response);
         } catch (Exception e) {
             Map<String, String> error = new HashMap<>();
@@ -212,8 +205,8 @@ public class SchemaController {
     }
     
     /**
-     * 获取当前Schema内容
-     * @return 当前激活的Schema内容
+     * 获取当前 Schema 内容
+     * @return 当前激活的 Schema 内容
      */
     @GetMapping("/current")
     public ResponseEntity<?> getCurrentSchema() {
@@ -224,26 +217,24 @@ public class SchemaController {
     }
     
     /**
-     * 验证Schema语法
-     * @param request 包含待验证Schema内容的请求
+     * 验证 Schema 语法
+     * @param request 包含待验证 Schema 内容的请求
      * @return 验证结果信息
      */
     @PostMapping("/validate")
     public ResponseEntity<?> validateSchema(@RequestBody ValidateSchemaRequest request) {
         try {
-            // 通过创建临时schema来验证语法
+            // 通过创建临时 schema 来验证语法
             dynamicSchemaService.createSchema(
                 "temp_" + System.currentTimeMillis(),
                 request.getSchemaContent(),
-                "临时验证Schema"
+                "临时验证 Schema"
             );
             
-            // 验证成功后删除临时schema
-            // 这里简化处理，实际应该有更好的验证方法
-            
+            // 验证成功后删除临时 schema（这里简化处理，实际可考虑专用校验逻辑）
             Map<String, Object> response = new HashMap<>();
             response.put("valid", true);
-            response.put("message", "Schema语法正确");
+            response.put("message", "Schema 语法正确");
             return ResponseEntity.ok(response);
         } catch (Exception e) {
             Map<String, Object> response = new HashMap<>();
@@ -254,7 +245,7 @@ public class SchemaController {
     }
     
     /**
-     * 创建Schema请求DTO
+     * 创建 Schema 请求 DTO
      */
     public static class CreateSchemaRequest {
         private String schemaName;
@@ -272,7 +263,7 @@ public class SchemaController {
     }
     
     /**
-     * 更新Schema请求DTO
+     * 更新 Schema 请求 DTO
      */
     public static class UpdateSchemaRequest {
         private String schemaContent;
@@ -286,7 +277,7 @@ public class SchemaController {
     }
     
     /**
-     * 验证Schema请求DTO
+     * 验证 Schema 请求 DTO
      */
     public static class ValidateSchemaRequest {
         private String schemaContent;

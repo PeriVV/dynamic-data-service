@@ -1,53 +1,70 @@
 package com.example.dynamicdata.service;
 
-import java.util.*;
-import java.util.concurrent.atomic.AtomicInteger;
-import java.util.stream.Collectors;
-
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.stereotype.Service;
-import org.springframework.transaction.annotation.Transactional;
-
+import com.example.dynamicdata.entity.ResolverConfig;
 import com.example.dynamicdata.entity.SchemaDefinition;
 import com.example.dynamicdata.repository.SchemaDefinitionRepository;
-
 import graphql.GraphQL;
 import graphql.schema.DataFetcher;
 import graphql.schema.GraphQLSchema;
-import graphql.schema.idl.RuntimeWiring;
-import graphql.schema.idl.SchemaGenerator;
-import graphql.schema.idl.SchemaParser;
-import graphql.schema.idl.TypeDefinitionRegistry;
+import graphql.schema.idl.*;
+import graphql.scalars.ExtendedScalars;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
+
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
- * 动态GraphQL Schema管理服务类
- * - 完全不手写SDL：基于 ResolverConfig 自动生成 Query/Mutation、参数与返回类型
- * - 保存/发布API后，调用 reloadGraphQLSchema() 即可热更新 /graphql
+ * 动态 GraphQL Schema 管理（改造版）：
+ *
+ * 1. Schema 不再由 resolver_config 动态生成 SDL，而是完全使用「手写/配置」的 SDL（存储在 SchemaDefinition 表中，激活的那一份）。
+ * 2. resolver_config 只负责：
+ *    - 提供 SQL
+ *    - 提供 dataSource
+ *    - 由本类创建对应的 DataFetcher，并绑定到你手写的 schema 中的字段
+ * 3. 因此：
+ *    - 你在 schemaContent 里可以自由写：User / Order / UserOrder / JSON 等强类型
+ *    - 例如 getUserOrders 可以返回 [UserOrder!]!，不再被强制改成 JSON
  */
 @Service
 @Transactional
 public class DynamicSchemaService {
 
-    private static final Logger logger = LoggerFactory.getLogger(DynamicSchemaService.class);
+    private static final Logger log = LoggerFactory.getLogger(DynamicSchemaService.class);
 
-    @Autowired private SchemaDefinitionRepository schemaRepository;
-    @Autowired private ResolverConfigService     resolverConfigService;
-    @Autowired private DynamicSqlExecutor        sqlExecutor;
-    // 放在类字段区（比如 currentGraphQL 旁边）
+    private final SchemaDefinitionRepository schemaRepository;
+    private final ResolverConfigService resolverConfigService;
+    private final DynamicSqlExecutor sqlExecutor;
+    // 当前挂在 /graphql 上的可热更新服务（可选）
     private RefreshableGraphQlService graphQlService;
 
-    /** 运行中的 GraphQL 引擎实例（热更新时替换） */
-    private GraphQL currentGraphQL;
-    /** 缓存最近一次生成的 SDL 文本，避免无变化重建 */
-    private String  currentSchemaContent;
+    /** 当前有效的 GraphQL 实例（供 /graphql 使用） */
+    private volatile GraphQL currentGraphQL;
+    /** 最近一次生成的 SDL 文本，仅用于调试查看 */
+    private volatile String currentSchemaContent = "";
 
-    // --------------------------- 对外常规CRUD（与你原来一致） ---------------------------
+    public DynamicSchemaService(SchemaDefinitionRepository schemaRepository,
+                                ResolverConfigService resolverConfigService,
+                                DynamicSqlExecutor sqlExecutor) {
+        this.schemaRepository = schemaRepository;
+        this.resolverConfigService = resolverConfigService;
+        this.sqlExecutor = sqlExecutor;
+    }
 
-    public List<SchemaDefinition> getAllSchemas() { return schemaRepository.findAll(); }
+    // =============== 一、对外：SchemaDefinition 的 CRUD（原有功能保留） =================
 
-    public List<SchemaDefinition> getActiveSchemas() { return schemaRepository.findByIsActiveTrue(); }
+    public List<SchemaDefinition> getAllSchemas() {
+        return schemaRepository.findAll();
+    }
+
+    public List<SchemaDefinition> getActiveSchemas() {
+        return schemaRepository.findByIsActiveTrue();
+    }
 
     public Optional<SchemaDefinition> getSchemaByName(String schemaName) {
         return schemaRepository.findBySchemaName(schemaName);
@@ -55,89 +72,83 @@ public class DynamicSchemaService {
 
     public SchemaDefinition createSchema(String schemaName, String schemaContent, String description) {
         if (schemaRepository.existsBySchemaName(schemaName)) {
-            throw new RuntimeException("Schema名称已存在: " + schemaName);
+            throw new RuntimeException("Schema 名称已存在: " + schemaName);
         }
         validateSchemaContent(schemaContent);
         SchemaDefinition saved = schemaRepository.save(new SchemaDefinition(schemaName, schemaContent, description));
-        logger.info("成功创建Schema定义: {} (ID: {})", schemaName, saved.getId());
+        log.info("创建 Schema 定义成功: {} (id={})", schemaName, saved.getId());
         return saved;
     }
 
     public SchemaDefinition updateSchema(Long id, String schemaContent, String description) {
         SchemaDefinition schema = schemaRepository.findById(id)
-                .orElseThrow(() -> new RuntimeException("Schema不存在: " + id));
+                .orElseThrow(() -> new RuntimeException("Schema 不存在: " + id));
         validateSchemaContent(schemaContent);
         String oldVersion = String.valueOf(schema.getVersion());
         schema.setSchemaContent(schemaContent);
         schema.setDescription(description);
         schema.setVersion(schema.getVersion() + 1);
         SchemaDefinition updated = schemaRepository.save(schema);
-        logger.info("成功更新Schema定义: {} (版本: {} -> {})", schema.getSchemaName(), oldVersion, updated.getVersion());
+        log.info("更新 Schema 定义成功: {} (version {} -> {})", schema.getSchemaName(), oldVersion, updated.getVersion());
         return updated;
     }
 
     public void activateSchema(Long id) {
         SchemaDefinition schema = schemaRepository.findById(id)
-                .orElseThrow(() -> new RuntimeException("Schema不存在: " + id));
+                .orElseThrow(() -> new RuntimeException("Schema 不存在: " + id));
+        // 标记其它为未激活
         for (SchemaDefinition s : schemaRepository.findByIsActiveTrue()) {
             s.setIsActive(false);
             schemaRepository.save(s);
         }
         schema.setIsActive(true);
         schemaRepository.save(schema);
-        logger.info("成功激活Schema: {} (版本: {})", schema.getSchemaName(), schema.getVersion());
+        log.info("激活 Schema: {} (version={})", schema.getSchemaName(), schema.getVersion());
+        // 激活后，重新加载 GraphQLSchema（此时将使用手写 SDL + resolver_config）
         reloadGraphQLSchema();
     }
 
     public void deactivateSchema(Long id) {
         SchemaDefinition schema = schemaRepository.findById(id)
-                .orElseThrow(() -> new RuntimeException("Schema不存在: " + id));
+                .orElseThrow(() -> new RuntimeException("Schema 不存在: " + id));
         schema.setIsActive(false);
         schemaRepository.save(schema);
-        logger.info("成功停用Schema: {}", schema.getSchemaName());
+        log.info("停用 Schema: {}", schema.getSchemaName());
         reloadGraphQLSchema();
     }
 
     public void deleteSchema(Long id) {
         SchemaDefinition schema = schemaRepository.findById(id)
-                .orElseThrow(() -> new RuntimeException("Schema不存在: " + id));
+                .orElseThrow(() -> new RuntimeException("Schema 不存在: " + id));
         if (Boolean.TRUE.equals(schema.getIsActive())) {
-            throw new RuntimeException("无法删除激活的Schema，请先停用");
+            throw new RuntimeException("不能删除激活中的 Schema，请先停用");
         }
         schemaRepository.delete(schema);
-        logger.info("成功删除Schema定义: {}", schema.getSchemaName());
+        log.info("删除 Schema: {}", schema.getSchemaName());
     }
 
-    // --------------------------- “不手写SDL”的关键：自动生成并热更新 ---------------------------
+    // =============== 二、给 /graphql 用：动态生成 & 热更新 =================
 
     /**
-     * 重新生成并热替换 GraphQL Schema（基于 ResolverConfig）
-     * - SELECT ById/ByCode/ByName -> 单对象；其它 SELECT -> [对象]
-     * - MUTATION -> MutationResult { success, affected }
+     * 重新生成 GraphQLSchema 并替换当前实例
+     * - 外部可以在“发布/更新 API 成功后”调用
      */
-    public void reloadGraphQLSchema() {
-        try {
-            // 1) 基于 resolver 配置重建 Schema
-            GraphQLSchema newSchema = buildSchemaFromConfigs();
+    public synchronized void reloadGraphQLSchema() {
+        GraphQLSchema schema = buildSchemaFromConfigs();
+        // 更新本地 GraphQL 实例（如果有地方直接调用 getCurrentGraphQL）
+        this.currentGraphQL = GraphQL.newGraphQL(schema).build();
 
-            // 2) 如果有挂载 RefreshableGraphQlService，就热更新它（用于 /graphql 端点）
-            if (this.graphQlService != null) {
-                this.graphQlService.reload(newSchema);
-                logger.info("GraphQL Schema 已热更新并应用到 /graphql 端点");
-            } else {
-                // 否则保留你原有的本地 GraphQL 实例（以兼容你之前的用法）
-                this.currentGraphQL = GraphQL.newGraphQL(newSchema).build();
-                logger.info("GraphQL Schema 已重新加载（本地实例更新）");
-            }
-
-        } catch (Exception e) {
-            logger.error("重新加载 GraphQL Schema 失败: {}", e.getMessage(), e);
-            throw new RuntimeException("Schema 重新加载失败: " + e.getMessage(), e);
+        // 如果有挂着的 RefreshableGraphQlService，就一起刷新 /graphql
+        if (this.graphQlService != null) {
+            this.graphQlService.reload(schema);
         }
+
+        log.info("GraphQL Schema 已根据手写 SDL + resolver_config 重新生成并加载完成");
     }
 
-
-    /** 提供给 /graphql 端点使用（首次访问会触发生成） */
+    /**
+     * /graphql 处理时获取当前的 GraphQL 对象
+     */
     public GraphQL getCurrentGraphQL() {
         if (currentGraphQL == null) {
             reloadGraphQLSchema();
@@ -145,245 +156,112 @@ public class DynamicSchemaService {
         return currentGraphQL;
     }
 
-    public String getCurrentSchemaContent() { return currentSchemaContent; }
-
-    // --------------------------- 生成 SDL：核心逻辑 ---------------------------
-
-    /** 把 ResolverConfig 转成 SDL；完全不需要手写 schema */
-    private String generateDynamicSchema() {
-        StringBuilder sdl = new StringBuilder();
-
-        // 标量：标准标量（ID、String、Int...）在 graphql-java 内置，无需声明
-        // 如需 JSON，可解开下一行：但我们下面不用 JSON 作为返回，全部生成具体类型
-        // sdl.append("scalar JSON\n\n");
-
-        List<com.example.dynamicdata.entity.ResolverConfig> all = resolverConfigService.getEnabledConfigs();
-        List<com.example.dynamicdata.entity.ResolverConfig> queries =
-                all.stream().filter(rc -> "QUERY".equalsIgnoreCase(rc.getOperationType())).toList();
-        List<com.example.dynamicdata.entity.ResolverConfig> mutations =
-                all.stream().filter(rc -> "MUTATION".equalsIgnoreCase(rc.getOperationType())).toList();
-
-        // --- 1) 先生成所有“专属返回类型” ---
-        // 规则：每个 resolver 生成一个 Result 类型（避免你手写 User、Order 等）
-        // 字段来自 output_fields JSON；没有则默认给一个 { raw: String }（防止前端无字段时报错）
-        Set<String> definedTypeNames = new HashSet<>();
-        for (com.example.dynamicdata.entity.ResolverConfig rc : all) {
-            String typeName = resultTypeName(rc.getResolverName());
-            if (definedTypeNames.add(typeName)) {
-                Map<String, String> fields = parseOutputFields(rc.getOutputFields());
-                if (fields.isEmpty()) {
-                    fields = Map.of("raw", "String");
-                }
-                sdl.append("type ").append(typeName).append(" {\n");
-                for (Map.Entry<String, String> f : fields.entrySet()) {
-                    // 将不规范类型兜底为 String
-                    String gqlType = normalizeScalar(f.getValue());
-                    sdl.append("  ").append(f.getKey()).append(": ").append(gqlType).append("\n");
-                }
-                sdl.append("}\n\n");
-            }
-        }
-
-        // 变更统一返回
-        if (!mutations.isEmpty()) {
-            sdl.append("type MutationResult {\n")
-                    .append("  success: Boolean!\n")
-                    .append("  affected: Int\n")
-                    .append("}\n\n");
-        }
-
-        // --- 2) 生成 Query 根类型 ---
-        sdl.append("type Query {\n");
-        if (queries.isEmpty()) {
-            sdl.append("  _empty: String\n");
-        } else {
-            for (com.example.dynamicdata.entity.ResolverConfig rc : queries) {
-                String field = buildFieldSDL(rc, /*isMutation*/ false);
-                sdl.append("  ").append(field).append("\n");
-            }
-        }
-        sdl.append("}\n\n");
-
-        // --- 3) 生成 Mutation 根类型 ---
-        if (!mutations.isEmpty()) {
-            sdl.append("type Mutation {\n");
-            for (com.example.dynamicdata.entity.ResolverConfig rc : mutations) {
-                String field = buildFieldSDL(rc, /*isMutation*/ true);
-                sdl.append("  ").append(field).append("\n");
-            }
-            sdl.append("}\n\n");
-        }
-
-        // --- 4) schema 根（可省略，graphql-java 会默认 Query）---
-        // 这里显式写上，便于某些工具识别：
-        sdl.append("schema { query: Query");
-        if (!mutations.isEmpty()) sdl.append(", mutation: Mutation");
-        sdl.append(" }\n");
-
-        return sdl.toString();
+    public String getCurrentSchemaContent() {
+        return currentSchemaContent;
     }
 
-    /** 构造根字段 SDL：resolverName(参数...): 返回类型 / [返回类型] */
-    private String buildFieldSDL(com.example.dynamicdata.entity.ResolverConfig rc, boolean isMutation) {
-        String name   = rc.getResolverName();
-        String args   = buildArgsSDL(rc.getInputParameters());
-        String rType;
-
-        if (!isMutation) {
-            // SELECT：ById/ByCode/ByName -> 单对象；其他 -> 列表
-            String base = resultTypeName(name);
-            boolean single = name.matches(".*(ById|ByCode|ByName)$");
-            rType = single ? base : "[" + base + "]";
-        } else {
-            rType = "MutationResult!";
-        }
-
-        return name + "(" + args + "): " + rType;
-    }
-
-    /** 参数 SDL：基于 input_parameters JSON（name->GraphQLType）。为空就不给参数。 */
-    private String buildArgsSDL(String inputParametersJson) {
-        Map<String, Object> defs = Collections.emptyMap();
-        try {
-            defs = sqlExecutor.parseParameters(inputParametersJson);
-        } catch (Exception ignore) {}
-
-        if (defs == null || defs.isEmpty()) return "";
-
-        // 允许 value 是 {type:String, required:Boolean} 或 直接 "String"
-        List<String> parts = new ArrayList<>();
-        for (Map.Entry<String, Object> e : defs.entrySet()) {
-            String name = e.getKey();
-            String type = "String";
-            boolean required = false;
-
-            Object v = e.getValue();
-            if (v instanceof Map<?,?> m) {
-                Object t = m.get("type");
-                if (t != null) type = String.valueOf(t);
-                Object req = m.get("required");
-                if (req != null) required = Boolean.parseBoolean(String.valueOf(req));
-            } else if (v != null) {
-                type = String.valueOf(v);
-            }
-
-            type = normalizeScalar(type);
-            parts.add(name + ": " + type + (required ? "!" : ""));
-        }
-        return String.join(", ", parts);
-    }
-
-    /** 将不规范的标量名兜底为合法的 GraphQL 标量 */
-    private String normalizeScalar(String raw) {
-        if (raw == null || raw.isBlank()) return "String";
-        String t = raw.trim();
-        // 常见别名统一
-        if (t.equalsIgnoreCase("integer") || t.equalsIgnoreCase("long")) return "Int";
-        if (t.equalsIgnoreCase("bool")) return "Boolean";
-        if (t.equalsIgnoreCase("float32") || t.equalsIgnoreCase("float64") || t.equalsIgnoreCase("double")) return "Float";
-        if (t.equalsIgnoreCase("id")) return "ID";
-        if (t.equalsIgnoreCase("string") || t.equalsIgnoreCase("ID")
-                || t.equalsIgnoreCase("Int") || t.equalsIgnoreCase("Float")
-                || t.equalsIgnoreCase("Boolean")) return Character.toUpperCase(t.charAt(0)) + t.substring(1).toLowerCase();
-        // 其它一律当成 String（避免 UnknownType）
-        return "String";
-    }
-
-    /** 解析 output_fields：支持两种格式
-     *  1) [{"name":"id","type":"ID"}, {"name":"email","type":"String"}]
-     *  2) {"id":"ID","email":"String"}
+    /**
+     * 使用“激活的手写 SDL”+ resolver_config 构建 GraphQLSchema
      */
-    @SuppressWarnings("unchecked")
-    private Map<String, String> parseOutputFields(String json) {
+    public GraphQLSchema buildSchemaFromConfigs() {
         try {
-            if (json == null || json.isBlank()) return Collections.emptyMap();
-            Object obj = sqlExecutor.parseParameters(json);
-            if (obj instanceof Map<?, ?> m) {
-                Map<String, String> out = new LinkedHashMap<>();
-                for (Map.Entry<?, ?> e : m.entrySet()) {
-                    out.put(String.valueOf(e.getKey()), normalizeScalar(String.valueOf(e.getValue())));
-                }
-                return out;
-            } else if (obj instanceof List<?> list) {
-                Map<String, String> out = new LinkedHashMap<>();
-                for (Object o : list) {
-                    if (o instanceof Map<?, ?> one) {
-                        Object n = one.get("name");
-                        Object t = one.get("type");
-                        if (n != null) out.put(String.valueOf(n), normalizeScalar(t == null ? "String" : String.valueOf(t)));
-                    }
-                }
-                return out;
+            // 1. 从 resolver_config 获取所有启用的配置（用于绑定 DataFetcher）
+            List<ResolverConfig> configs = resolverConfigService.getEnabledConfigs();
+
+            // 2. 从 SchemaDefinition 中获取激活的 schema 内容（可以支持多份，按需合并）
+            List<SchemaDefinition> actives = schemaRepository.findByIsActiveTrue();
+            if (actives == null || actives.isEmpty()) {
+                throw new RuntimeException("没有激活的 GraphQL Schema 定义，请先在前端激活一份 schema");
             }
-        } catch (Exception ignore) {}
-        return Collections.emptyMap();
+
+            List<String> schemaContents = actives.stream()
+                    .map(SchemaDefinition::getSchemaContent)
+                    .filter(s -> s != null && !s.isBlank())
+                    .toList();
+
+            String sdl = mergeSchemaContents(schemaContents);
+            this.currentSchemaContent = sdl;
+
+            // 3. 解析你手写/配置好的 SDL
+            SchemaParser parser = new SchemaParser();
+            TypeDefinitionRegistry registry = parser.parse(sdl);
+
+            // 4. 根据 resolver_config 构建 RuntimeWiring（只负责 DataFetcher / 标量等）
+            RuntimeWiring wiring = buildRuntimeWiring(configs);
+
+            SchemaGenerator generator = new SchemaGenerator();
+            GraphQLSchema schema = generator.makeExecutableSchema(registry, wiring);
+            log.info("GraphQL Schema 构建成功，使用手写 SDL + {} 个 resolver_config", configs.size());
+            return schema;
+        } catch (Exception e) {
+            log.error("根据手写 SDL + resolver_config 构建 GraphQLSchema 失败", e);
+            throw new RuntimeException("构建 GraphQLSchema 失败: " + e.getMessage(), e);
+        }
     }
 
-    /** 生成“专属返回类型名”：ResolverName_Result（首字母大写） */
-    private String resultTypeName(String resolverName) {
-        if (resolverName == null || resolverName.isBlank()) return "Result";
-        String base = resolverName.substring(0, 1).toUpperCase() + resolverName.substring(1);
-        return base + "_Result";
-    }
+    // =============== 三、运行时 wiring：把 resolver 绑到 SQL 执行 =================
 
-    // --------------------------- RuntimeWiring（把 resolver 绑上） ---------------------------
+    private RuntimeWiring buildRuntimeWiring(List<ResolverConfig> configs) {
+        RuntimeWiring.Builder builder = RuntimeWiring.newRuntimeWiring();
 
-    private RuntimeWiring buildRuntimeWiring() {
-        RuntimeWiring.Builder wiring = RuntimeWiring.newRuntimeWiring();
+        // JSON 标量（依赖 graphql-java-extended-scalars）
+        builder.scalar(ExtendedScalars.Json);
 
-        // --- 1) 兜底：无论有没有配置，都提供可用的基础查询 ---
-        // 注意：你的 SDL 里需要有对应字段（例如 _ping / health）
-        wiring.type("Query", typeWiring -> typeWiring
-                .dataFetcher("_ping", env -> "pong")
-                .dataFetcher("health", env -> "OK")
+        // 固定 health（前提是你的 schema 里有 type Query { health: String! }）
+        builder.type("Query", typeWiring ->
+                typeWiring.dataFetcher("health", env -> "OK")
         );
 
-        // 如果你的 SDL 里写了 `scalar JSON`，就把扩展标量注册上（没写就别加）
-        // wiring.scalar(ExtendedScalars.Json);
-
-        // --- 2) 动态解析器（保持你原来的逻辑） ---
-        List<com.example.dynamicdata.entity.ResolverConfig> configs = resolverConfigService.getEnabledConfigs();
-        for (com.example.dynamicdata.entity.ResolverConfig c : configs) {
-            DataFetcher<Object> df = createDataFetcher(c);
-            if ("QUERY".equalsIgnoreCase(c.getOperationType())) {
-                wiring.type("Query", tb -> tb.dataFetcher(c.getResolverName(), df));
-            } else if ("MUTATION".equalsIgnoreCase(c.getOperationType())) {
-                wiring.type("Mutation", tb -> tb.dataFetcher(c.getResolverName(), df));
+        // 动态 Query / Mutation 的 DataFetcher 绑定
+        for (ResolverConfig cfg : configs) {
+            DataFetcher<Object> df = createDataFetcher(cfg);
+            if ("QUERY".equalsIgnoreCase(cfg.getOperationType())) {
+                builder.type("Query", tw -> tw.dataFetcher(cfg.getResolverName(), df));
+            } else if ("MUTATION".equalsIgnoreCase(cfg.getOperationType())) {
+                builder.type("Mutation", tw -> tw.dataFetcher(cfg.getResolverName(), df));
             }
         }
 
-        logger.info("Dynamic resolvers built successfully. Total configs: {}", configs.size());
-        return wiring.build();
+        return builder.build();
     }
 
-    private DataFetcher<Object> createDataFetcher(com.example.dynamicdata.entity.ResolverConfig config) {
+    /**
+     * 针对单个 resolver 的 DataFetcher
+     *  - 自动根据 dataSource 字段选择 MYSQL / DM8
+     *  - QUERY 走主库；MUTATION 走 sandbox
+     *  - 返回：
+     *      - 查询：List<Map<String,Object>> 或单条 Map（ById/ByCode/ByName 结尾的走单条）
+     *      - 变更：{ success, affected }
+     */
+    private DataFetcher<Object> createDataFetcher(ResolverConfig config) {
         return env -> {
             Map<String, Object> args = env.getArguments();
             String sql = config.getSqlQuery();
-            // ★ 从配置里拿数据源类型，默认 MYSQL
             String ds = Optional.ofNullable(config.getDataSource())
                     .map(String::trim)
                     .map(String::toUpperCase)
                     .orElse("MYSQL");   // MYSQL / DM8 / POSTGRESQL
 
             if (sql == null || sql.isBlank()) {
-                throw new RuntimeException("SQL为空: " + config.getResolverName());
+                throw new RuntimeException("SQL 为空: " + config.getResolverName());
             }
 
             boolean isSelect = sql.trim().toLowerCase().startsWith("select");
-            boolean useSandbox = !isSelect;  // 查询走主库，写操作走 sandbox
+            boolean useSandbox = !isSelect; // 查询走主库，写操作走 sandbox
 
             try {
                 if ("QUERY".equalsIgnoreCase(config.getOperationType())) {
-                    // ★ 用带 dataSourceKind + useSandbox 的重载
                     List<Map<String, Object>> rows =
                             sqlExecutor.executeQuery(sql, args, ds, useSandbox);
 
                     boolean single = config.getResolverName() != null
                             && config.getResolverName().matches(".*(ById|ByCode|ByName)$");
 
-                    return single ? (rows.isEmpty() ? null : rows.get(0)) : rows;
-
+                    if (single) {
+                        return rows.isEmpty() ? null : rows.get(0);
+                    } else {
+                        return rows;
+                    }
                 } else if ("MUTATION".equalsIgnoreCase(config.getOperationType())) {
                     int affected =
                             sqlExecutor.executeUpdate(sql, args, ds, useSandbox);
@@ -394,24 +272,23 @@ public class DynamicSchemaService {
                     return r;
                 }
 
-                throw new RuntimeException("Unsupported operation type: " + config.getOperationType());
+                throw new RuntimeException("不支持的 operationType: " + config.getOperationType());
             } catch (Exception e) {
-                // ★ 包一层，GraphQL 里会显示 “Error executing SQL: xxx”
+                // 统一包装，GraphQL 层能看到 “Error executing SQL: xxx”
                 throw new RuntimeException("Error executing SQL: " + e.getMessage(), e);
             }
         };
     }
 
-
-    // --------------------------- 其它工具/校验 ---------------------------
+    // =============== 四、SDL 校验 & 合并（保留你原来的工具方法） =================
 
     private void validateSchemaContent(String schemaContent) {
         try {
             SchemaParser sp = new SchemaParser();
             TypeDefinitionRegistry reg = sp.parse(schemaContent);
-            logger.debug("Schema语法验证通过，类型数量: {}", reg.types().size());
+            log.debug("Schema 语法验证通过，类型数量 {}", reg.types().size());
         } catch (Exception e) {
-            throw new RuntimeException("GraphQL Schema语法错误: " + e.getMessage(), e);
+            throw new RuntimeException("GraphQL Schema 语法错误: " + e.getMessage(), e);
         }
     }
 
@@ -426,37 +303,13 @@ public class DynamicSchemaService {
                 cnt.incrementAndGet();
             }
         }
-        logger.debug("合并 {} 段SDL", cnt.get());
+        log.debug("合并 {} 段 SDL", cnt.get());
         return sb.toString();
     }
-    // 让外部把 RefreshableGraphQlService 注入进来，便于热更新时调用 reload()
+
+    // 供 GraphQLRuntimeConfig 把 RefreshableGraphQlService 传进来
     public void attach(RefreshableGraphQlService svc) {
         this.graphQlService = svc;
-    }
-    // 启动时或需要时，基于当前数据库的 resolver 配置，生成 GraphQLSchema
-    public GraphQLSchema buildSchemaFromConfigs() {
-        try {
-            // 1) 生成 SDL（你已有的方法）
-            String sdl = generateDynamicSchema();
-
-            // 2) 解析 SDL -> TypeDefinitionRegistry
-            SchemaParser parser = new SchemaParser();
-            TypeDefinitionRegistry typeRegistry = parser.parse(sdl);
-
-            // 3) 生成 RuntimeWiring（你已有的方法）
-            RuntimeWiring wiring = buildRuntimeWiring();
-
-            // 4) 生成可执行 Schema
-            SchemaGenerator generator = new SchemaGenerator();
-            GraphQLSchema executable = generator.makeExecutableSchema(typeRegistry, wiring);
-
-            // 记录一下当前内存中的 sdl，便于后续是否变更的判断
-            this.currentSchemaContent = sdl;
-            return executable;
-        } catch (Exception e) {
-            logger.error("根据配置构建 GraphQLSchema 失败", e);
-            throw new RuntimeException("构建 GraphQLSchema 失败: " + e.getMessage(), e);
-        }
     }
 
 }

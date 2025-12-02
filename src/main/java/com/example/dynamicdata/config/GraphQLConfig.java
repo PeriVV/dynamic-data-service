@@ -38,7 +38,7 @@ public class GraphQLConfig {
 
     /**
      * 关键：提供一个 GraphQlSource Bean
-     * - 动态拼装 SDL（只声明字段名，不写具体字段结构，统一用 JSON 标量兜底）
+     * - 动态拼装 SDL（只声明字段名，不写具体字段结构，统一走 JSON 标量兜底）
      * - 动态绑定 DataFetcher
      */
     @Bean
@@ -86,7 +86,7 @@ public class GraphQLConfig {
         return GraphQlSource.builder(schema).build();
     }
 
-    /** —— 下面三个方法保持你原有逻辑 —— */
+    /** ———— 下面三个方法保留你原有逻辑 ————*/
 
     /** 核心：自动判断 SQL 类型 -> 主库 / 沙箱 */
     private DataFetcher<Object> createDataFetcher(ResolverConfig config) {
@@ -96,7 +96,7 @@ public class GraphQLConfig {
             String sql = config.getSqlQuery();
 
             logger.debug("GraphQL参数: {}", arguments);
-            logger.debug("提取的参数: {}", parameters);
+            logger.debug("提取的参数 {}", parameters);
             logger.debug("SQL查询: {}", sql);
 
             try {
@@ -110,12 +110,12 @@ public class GraphQLConfig {
 
                 if (isSelect) {
                     List<Map<String, Object>> results = sqlExecutor.executeQuery(sql, parameters, useSandbox);
-                    logger.info("GraphQL 查询 -> 数据库: {}", useSandbox ? "sandbox" : "main");
+                    logger.info("GraphQL 查询 -> 数据库 {}", useSandbox ? "sandbox" : "main");
                     // 直接返回 List<Map> 交给 JSON 标量
                     return results;
                 } else {
                     int affected = sqlExecutor.executeUpdate(sql, parameters, useSandbox);
-                    logger.info("GraphQL 变更 -> 数据库: {}", useSandbox ? "sandbox" : "main");
+                    logger.info("GraphQL 变更 -> 数据库 {}", useSandbox ? "sandbox" : "main");
 
                     Map<String, Object> result = new HashMap<>();
                     result.put("affectedRows", affected);
@@ -134,7 +134,7 @@ public class GraphQLConfig {
         };
     }
 
-    /** 支持手动SQL执行的 dataFetcher */
+    /** 支持手动SQL执行的dataFetcher */
     private DataFetcher<Object> createDynamicQueryDataFetcher() {
         return environment -> {
             String sql = environment.getArgument("sql");
@@ -217,7 +217,7 @@ public class GraphQLConfig {
         sb.append("}\n");
 
         String sdl = sb.toString();
-        logger.info("动态 SDL 生成成功:\n{}", sdl);
+        logger.info("动态SDL 生成成功:\n{}", sdl);
         return sdl;
     }
 

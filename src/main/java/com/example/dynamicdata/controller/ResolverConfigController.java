@@ -1,9 +1,12 @@
 package com.example.dynamicdata.controller;
 
+import java.nio.charset.Charset;
 import java.util.*;
 
 import com.example.dynamicdata.utils.DbNameResolver;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -13,6 +16,8 @@ import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
+import jakarta.servlet.http.HttpServletRequest;
+import org.springframework.util.StreamUtils;
 
 import com.example.dynamicdata.entity.ResolverConfig;
 import com.example.dynamicdata.service.DynamicSqlExecutor;
@@ -20,6 +25,7 @@ import com.example.dynamicdata.service.ResolverConfigService;
 
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.jdbc.core.JdbcTemplate;
+import java.nio.charset.StandardCharsets;
 
 /**
  * GraphQL解析器配置管理控制器
@@ -208,21 +214,41 @@ public class ResolverConfigController {
 
     /**
      * 测试SQL查询
-     * @param request 包含SQL语句和参数的请求对象
+     * @param servletRequest 包含SQL语句和参数的请求对象
      * @return 查询结果或错误信息
      */
-    @PostMapping("/test-sql")
-    public ResponseEntity<Map<String, Object>> testSql(@RequestBody Map<String, Object> request) {
+    @PostMapping(value = "/test-sql", consumes = MediaType.ALL_VALUE, produces = MediaType.APPLICATION_JSON_VALUE)
+    public ResponseEntity<Map<String, Object>> testSql(HttpServletRequest servletRequest) {
         Map<String, Object> response = new HashMap<>();
 
         try {
-            String sql = (String) request.get("sql");
+            // 兼容各种 Content-Type：手动读取 body，若是 JSON 则解析，否则用空对象
+            Map<String, Object> request = new HashMap<>();
+            try {
+                String body = StreamUtils.copyToString(
+                        servletRequest.getInputStream(),
+                        servletRequest.getCharacterEncoding() != null
+                                ? Charset.forName(servletRequest.getCharacterEncoding())
+                                : StandardCharsets.UTF_8);
+                if (body != null && !body.isBlank()) {
+                    request = new ObjectMapper().readValue(body, Map.class);
+                }
+            } catch (Exception parseEx) {
+                response.put("success", false);
+                response.put("message", "请求体读取或解析失败，请确认已发送 JSON");
+                return ResponseEntity.badRequest().body(response);
+            }
+
+            String sql = Optional.ofNullable(request.get("sql"))
+                    .map(Object::toString)
+                    .orElse("")
+                    .trim();
             @SuppressWarnings("unchecked")
-            Map<String, Object> parameters = request.get("parameters") != null ?
+            Map<String, Object> parameters = request.get("parameters") instanceof Map ?
                     (Map<String, Object>) request.get("parameters") :
                     new HashMap<>();
 
-            if (sql == null || sql.trim().isEmpty()) {
+            if (sql.isEmpty()) {
                 response.put("success", false);
                 response.put("message", "SQL query is required");
                 return ResponseEntity.badRequest().body(response);
