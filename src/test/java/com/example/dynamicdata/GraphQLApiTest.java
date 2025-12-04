@@ -1,10 +1,12 @@
 package com.example.dynamicdata;
 
+import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.http.*;
 import org.springframework.web.client.RestTemplate;
 
+@Disabled("Manual integration example; disable by default")
 @SpringBootTest
 public class GraphQLApiTest {
 

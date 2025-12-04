@@ -13,6 +13,7 @@ import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -68,6 +69,15 @@ public class DynamicSchemaService {
 
     public Optional<SchemaDefinition> getSchemaByName(String schemaName) {
         return schemaRepository.findBySchemaName(schemaName);
+    }
+
+    public Optional<SchemaDefinition> getSchemaById(Long id) {
+        return schemaRepository.findById(id);
+    }
+
+    /** 对外暴露的校验入口，复用内部语法校验逻辑 */
+    public void validateSchema(String schemaContent) {
+        validateSchemaContent(schemaContent);
     }
 
     public SchemaDefinition createSchema(String schemaName, String schemaContent, String description) {
@@ -174,12 +184,20 @@ public class DynamicSchemaService {
                 throw new RuntimeException("没有激活的 GraphQL Schema 定义，请先在前端激活一份 schema");
             }
 
-            List<String> schemaContents = actives.stream()
-                    .map(SchemaDefinition::getSchemaContent)
-                    .filter(s -> s != null && !s.isBlank())
-                    .toList();
+            SchemaDefinition active = actives.stream()
+                    .sorted(Comparator
+                            .comparing(SchemaDefinition::getUpdatedAt, Comparator.nullsLast(Comparator.naturalOrder())).reversed()
+                            .thenComparing(SchemaDefinition::getVersion, Comparator.nullsLast(Comparator.naturalOrder())).reversed()
+                            .thenComparing(SchemaDefinition::getId, Comparator.nullsLast(Comparator.naturalOrder())).reversed())
+                    .findFirst()
+                    .orElseThrow(() -> new RuntimeException("没有可用的激活 Schema"));
 
-            String sdl = mergeSchemaContents(schemaContents);
+            if (actives.size() > 1) {
+                log.warn("发现多条 is_active=true 的 Schema，只使用最新的一条 id={} name={} version={}",
+                        active.getId(), active.getSchemaName(), active.getVersion());
+            }
+
+            String sdl = active.getSchemaContent();
             this.currentSchemaContent = sdl;
 
             // 3. 解析你手写/配置好的 SDL

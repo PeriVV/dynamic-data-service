@@ -88,7 +88,7 @@ public class MultiDataSourceConfig {
     ) {
         HikariConfig cfg = new HikariConfig();
         cfg.setPoolName("HikariPool-dm8");
-        cfg.setJdbcUrl(url);   // 推荐：jdbc:dm://127.0.0.1:5236?SCHEMA=YOUR_SCHEMA&LOGINMODE=4
+        cfg.setJdbcUrl(url);
         cfg.setUsername(username);
         cfg.setPassword(password);
         cfg.setDriverClassName(driverClassName);
@@ -127,7 +127,7 @@ public class MultiDataSourceConfig {
     ) {
         HikariConfig cfg = new HikariConfig();
         cfg.setPoolName("HikariPool-dm8-sandbox");
-        cfg.setJdbcUrl(url);   // 推荐：jdbc:dm://127.0.0.1:5236?SCHEMA=SANDBOX&LOGINMODE=4
+        cfg.setJdbcUrl(url);
         cfg.setUsername(username);
         cfg.setPassword(password);
         cfg.setDriverClassName(driverClassName);
@@ -180,6 +180,39 @@ public class MultiDataSourceConfig {
     @Bean(name = {"postgresJdbcTemplate", "pgJdbcTemplate"})
     @ConditionalOnProperty(prefix = "postgres.datasource", name = "url")
     public JdbcTemplate postgresJdbcTemplate(@Qualifier("postgresDataSource") DataSource ds) {
+        return new JdbcTemplate(ds);
+    }
+
+    // =========================================================
+    // PostgreSQL Sandbox（可选；仅在 postgres.sandbox.url 存在时创建）
+    // =========================================================
+    @Bean(name = "postgresSandboxDataSource")
+    @ConditionalOnProperty(prefix = "postgres.sandbox", name = "url")
+    public DataSource postgresSandboxDataSource(
+            @Value("${postgres.sandbox.url}") String url,
+            @Value("${postgres.sandbox.username}") String username,
+            @Value("${postgres.sandbox.password}") String password,
+            @Value("${postgres.sandbox.driver-class-name:org.postgresql.Driver}") String driverClassName
+    ) {
+        HikariConfig cfg = new HikariConfig();
+        cfg.setPoolName("HikariPool-postgres-sandbox");
+        cfg.setJdbcUrl(url);
+        cfg.setUsername(username);
+        cfg.setPassword(password);
+        cfg.setDriverClassName(driverClassName);
+        cfg.setMinimumIdle(0);
+        cfg.setMaximumPoolSize(5);
+        cfg.setConnectionTimeout(5000);
+        cfg.setValidationTimeout(3000);
+        cfg.setIdleTimeout(60_000);
+        cfg.setMaxLifetime(300_000);
+        cfg.setConnectionTestQuery("SELECT 1");
+        return new HikariDataSource(cfg);
+    }
+
+    @Bean(name = "postgresSandboxJdbcTemplate")
+    @ConditionalOnProperty(prefix = "postgres.sandbox", name = "url")
+    public JdbcTemplate postgresSandboxJdbcTemplate(@Qualifier("postgresSandboxDataSource") DataSource ds) {
         return new JdbcTemplate(ds);
     }
 }

@@ -145,10 +145,9 @@ public class DataSourceMetadataController {
         try {
             return switch (type) {
                 case "MYSQL" -> ctx.getBean("mainJdbcTemplate", JdbcTemplate.class);
-                case "DM8" ->
-                        ctx.containsBean("dmJdbcTemplate") ? ctx.getBean("dmJdbcTemplate", JdbcTemplate.class) : null;
-                case "SANDBOX" ->
-                        ctx.containsBean("sandboxJdbcTemplate") ? ctx.getBean("sandboxJdbcTemplate", JdbcTemplate.class) : null;
+                case "DM8" -> ctx.containsBean("dmJdbcTemplate") ? ctx.getBean("dmJdbcTemplate", JdbcTemplate.class) : null;
+                case "POSTGRESQL" -> ctx.containsBean("postgresJdbcTemplate") ? ctx.getBean("postgresJdbcTemplate", JdbcTemplate.class) : null;
+                case "SANDBOX" -> ctx.containsBean("sandboxJdbcTemplate") ? ctx.getBean("sandboxJdbcTemplate", JdbcTemplate.class) : null;
                 default -> null;
             };
         } catch (Exception e) {
@@ -164,9 +163,9 @@ public class DataSourceMetadataController {
         String type = typeRaw.toUpperCase(Locale.ROOT);
 
         JdbcTemplate jt = switch (type) {
-            case "MYSQL" ->
-                    ctx.containsBean("mainJdbcTemplate") ? ctx.getBean("mainJdbcTemplate", JdbcTemplate.class) : null;
+            case "MYSQL" -> ctx.containsBean("mainJdbcTemplate") ? ctx.getBean("mainJdbcTemplate", JdbcTemplate.class) : null;
             case "DM8" -> ctx.containsBean("dmJdbcTemplate") ? ctx.getBean("dmJdbcTemplate", JdbcTemplate.class) : null;
+            case "POSTGRESQL" -> ctx.containsBean("postgresJdbcTemplate") ? ctx.getBean("postgresJdbcTemplate", JdbcTemplate.class) : null;
             default -> null;
         };
 
@@ -175,13 +174,23 @@ public class DataSourceMetadataController {
         }
 
         try {
-            List<Map<String, Object>> tables = jt.queryForList("SHOW TABLES");
-            List<Map<String, Object>> result = new ArrayList<>();
-            for (Map<String, Object> row : tables) {
-                String tableName = row.values().iterator().next().toString();
-                result.add(Map.of("tableName", tableName));
+            if (type.equals("POSTGRESQL")) {
+                List<Map<String, Object>> tables = jt.queryForList(
+                        "SELECT tablename FROM pg_tables WHERE schemaname NOT IN ('pg_catalog','information_schema')");
+                List<Map<String, Object>> result = new ArrayList<>();
+                for (Map<String, Object> row : tables) {
+                    result.add(Map.of("tableName", row.get("tablename")));
+                }
+                return result;
+            } else {
+                List<Map<String, Object>> tables = jt.queryForList("SHOW TABLES");
+                List<Map<String, Object>> result = new ArrayList<>();
+                for (Map<String, Object> row : tables) {
+                    String tableName = row.values().iterator().next().toString();
+                    result.add(Map.of("tableName", tableName));
+                }
+                return result;
             }
-            return result;
         } catch (Exception e) {
             // 针对 DM8 数据库使用不同 SQL
             if (type.equals("DM8")) {
@@ -202,9 +211,9 @@ public class DataSourceMetadataController {
         String type = typeRaw.toUpperCase(Locale.ROOT);
 
         JdbcTemplate jt = switch (type) {
-            case "MYSQL" ->
-                    ctx.containsBean("mainJdbcTemplate") ? ctx.getBean("mainJdbcTemplate", JdbcTemplate.class) : null;
+            case "MYSQL" -> ctx.containsBean("mainJdbcTemplate") ? ctx.getBean("mainJdbcTemplate", JdbcTemplate.class) : null;
             case "DM8" -> ctx.containsBean("dmJdbcTemplate") ? ctx.getBean("dmJdbcTemplate", JdbcTemplate.class) : null;
+            case "POSTGRESQL" -> ctx.containsBean("postgresJdbcTemplate") ? ctx.getBean("postgresJdbcTemplate", JdbcTemplate.class) : null;
             default -> null;
         };
 
@@ -228,6 +237,31 @@ public class DataSourceMetadataController {
                         tableName.toUpperCase()
                 );
 
+            } else if (type.equals("POSTGRESQL")) {
+                return jt.queryForList(
+                        """
+                                SELECT c.column_name,
+                                       c.data_type,
+                                       c.is_nullable,
+                                       c.character_maximum_length,
+                                       c.numeric_precision,
+                                       c.column_default,
+                                       (CASE WHEN tc.constraint_type = 'PRIMARY KEY' THEN true ELSE false END) AS primary
+                                FROM information_schema.columns c
+                                LEFT JOIN information_schema.key_column_usage kcu
+                                  ON c.table_name = kcu.table_name
+                                 AND c.column_name = kcu.column_name
+                                 AND c.table_schema = kcu.table_schema
+                                LEFT JOIN information_schema.table_constraints tc
+                                  ON tc.table_name = kcu.table_name
+                                 AND tc.constraint_name = kcu.constraint_name
+                                 AND tc.table_schema = kcu.table_schema
+                                WHERE c.table_name = ?
+                                  AND c.table_schema = current_schema()
+                                ORDER BY c.ordinal_position
+                                """,
+                        tableName
+                );
             } else {
                 return List.of(Map.of("error", "Unsupported database type: " + type));
             }
@@ -366,6 +400,17 @@ public class DataSourceMetadataController {
                             "comment", r.getOrDefault("COMMENTS", "")
                     ));
                 }
+            } else if ("POSTGRESQL".equalsIgnoreCase(type)) {
+                var list = jt.queryForList(
+                        "SELECT column_name, data_type FROM information_schema.columns WHERE table_name = ?",
+                        table);
+                for (var r : list) {
+                    rows.add(Map.of(
+                            "columnName", r.get("column_name"),
+                            "dataType", r.get("data_type"),
+                            "comment", ""
+                    ));
+                }
             } else { // MySQL
                 var list = jt.queryForList("DESCRIBE " + table);
                 for (var r : list) {
@@ -424,8 +469,11 @@ public class DataSourceMetadataController {
         // MySQL/PostgreSQL/DM8 都支持双引号（PG/DM8严格，MySQL需开启 sql_mode=ANSI_QUOTES 才把 "x" 视作标识符）
         // 为兼容性：MySQL 用 `x`，PG/DM8 用 "x"
         // DM8 和 PostgreSQL 使用双引号
-        if ("DM8".equalsIgnoreCase(type) || "POSTGRESQL".equalsIgnoreCase(type)) {
+        if ("DM8".equalsIgnoreCase(type)) {
             return "\"" + ident.toUpperCase() + "\"";
+        }
+        if ("POSTGRESQL".equalsIgnoreCase(type)) {
+            return "\"" + ident + "\"";
         }
 
         // MySQL 用反引号

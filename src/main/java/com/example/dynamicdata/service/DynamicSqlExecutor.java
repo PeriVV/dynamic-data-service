@@ -35,39 +35,55 @@ public class DynamicSqlExecutor {
     @Qualifier("mainJdbcTemplate")
     private JdbcTemplate mainJdbcTemplate;
 
-    @Autowired
+    @Autowired(required = false)
     @Qualifier("sandboxJdbcTemplate")
     private JdbcTemplate sandboxJdbcTemplate;
 
     private JdbcTemplate choose(boolean useSandbox) {
-        return useSandbox ? sandboxJdbcTemplate : mainJdbcTemplate;
+        return resolveTemplate("MYSQL", useSandbox);
     }
-    @Autowired @Qualifier("dmJdbcTemplate")
+    @Autowired(required = false) @Qualifier("dmJdbcTemplate")
     private JdbcTemplate dmJdbcTemplate;
 
-    @Autowired @Qualifier("dmSandboxJdbcTemplate")
+    @Autowired(required = false) @Qualifier("dmSandboxJdbcTemplate")
     private JdbcTemplate dmSandboxJdbcTemplate;
+
+    @Autowired(required = false) @Qualifier("postgresJdbcTemplate")
+    private JdbcTemplate postgresJdbcTemplate;
+
+    @Autowired(required = false) @Qualifier("postgresSandboxJdbcTemplate")
+    private JdbcTemplate postgresSandboxJdbcTemplate;
 
 // 仍然保留你原来的 mainJdbcTemplate / sandboxJdbcTemplate (MySQL)
 
     private JdbcTemplate resolveTemplate(String kind, boolean useSandbox) {
         String k = (kind == null ? "MYSQL" : kind.trim().toUpperCase());
         return switch (k) {
-            case "DM8" -> (useSandbox ? dmSandboxJdbcTemplate : dmJdbcTemplate);
-            // 如你后续要接 PostgreSQL，在此扩展 POSTGRESQL 分支
-            case "MYSQL" -> (useSandbox ? sandboxJdbcTemplate : mainJdbcTemplate);
+            case "DM8" -> requireTemplate(useSandbox ? dmSandboxJdbcTemplate : dmJdbcTemplate, k, useSandbox);
+            case "POSTGRESQL" -> requireTemplate(useSandbox ? postgresSandboxJdbcTemplate : postgresJdbcTemplate, k, useSandbox);
+            case "MYSQL" -> requireTemplate(useSandbox ? sandboxJdbcTemplate : mainJdbcTemplate, k, useSandbox);
             default -> throw new IllegalArgumentException("Unsupported dataSourceKind: " + kind);
         };
+    }
+
+    private JdbcTemplate requireTemplate(JdbcTemplate jt, String kind, boolean useSandbox) {
+        if (jt != null) {
+            return jt;
+        }
+        String targetProp = switch (kind) {
+            case "DM8" -> useSandbox ? "dm8.sandbox.url" : "dm8.datasource.url";
+            case "POSTGRESQL" -> useSandbox ? "postgres.sandbox.url" : "postgres.datasource.url";
+            case "MYSQL" -> useSandbox ? "sandbox.datasource.url" : "spring.datasource.url";
+            default -> "datasource.url";
+        };
+        throw new IllegalStateException(kind + " datasource not configured (" + targetProp + ")");
     }
 
 
     @Autowired
     public DynamicSqlExecutor(
-            @Qualifier("mainJdbcTemplate") JdbcTemplate mainJdbcTemplate,
-            @Qualifier("sandboxJdbcTemplate") JdbcTemplate sandboxJdbcTemplate, ObjectProvider<JdbcTemplate> dmJdbcProvider) {
+            @Qualifier("mainJdbcTemplate") JdbcTemplate mainJdbcTemplate) {
         this.mainJdbcTemplate = mainJdbcTemplate;
-        this.sandboxJdbcTemplate = sandboxJdbcTemplate;
-        this.dmJdbcProvider = dmJdbcProvider;
     }
 
 
@@ -176,8 +192,7 @@ public class DynamicSqlExecutor {
                     );
                     yield schema;
                 }
-                // 以后如果加 PG：
-                // case "POSTGRESQL" -> jt.queryForObject("SELECT current_database()", String.class);
+                case "POSTGRESQL" -> jt.queryForObject("SELECT current_database()", String.class);
                 default -> jt.queryForObject("SELECT DATABASE()", String.class); // MySQL
             };
         } catch (Exception e) {
@@ -307,7 +322,8 @@ public class DynamicSqlExecutor {
 
 
 
-    private final ObjectProvider<JdbcTemplate> dmJdbcProvider;
+    @Autowired
+    private ObjectProvider<JdbcTemplate> dmJdbcProvider;
 
     public List<Map<String, Object>> queryOnMain(String sql) {
         return mainJdbcTemplate.queryForList(sql);
